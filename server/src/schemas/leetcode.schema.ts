@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const connectLeetCodeSchema = z.object({
+export const leetCodeUsernameSchema = z.object({
   username: z
     .string()
     .trim()
@@ -12,4 +12,4 @@ export const connectLeetCodeSchema = z.object({
     ),
 });
 
-export type ConnectLeetCodeInput = z.infer<typeof connectLeetCodeSchema>;
+export type LeetCodeUsernameInput = z.infer<typeof leetCodeUsernameSchema>;

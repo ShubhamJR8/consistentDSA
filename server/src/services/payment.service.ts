@@ -5,6 +5,8 @@ import { User } from '../models/user.model.js';
 import { ApiError } from '../utils/apiError.js';
 import { CommitmentDto, getOwnedCommitment } from './commitment.shared.js';
 import { CommitmentService } from './commitment.service.js';
+import { assertCanStartCommitment } from './leetcodeRequirement.service.js';
+import { Plan } from '../models/plan.model.js';
 
 export interface CreateOrderDto {
   keyId: string;
@@ -34,7 +36,9 @@ export class PaymentService {
 
     // Real money moves here — an unverified email means refund/dispute correspondence could
     // never reach the account holder, so deposits are blocked until it's confirmed.
-    const user = await User.findById(userId).select('emailVerified');
+    const user = await User.findById(userId).select(
+      'emailVerified leetcodeUsername leetcodeVerifiedAt'
+    );
     if (!user || !user.emailVerified) {
       throw ApiError.forbidden(
         'EMAIL_NOT_VERIFIED',
@@ -49,6 +53,10 @@ export class PaymentService {
         'This commitment is not awaiting payment.'
       );
     }
+
+    // Re-checked here, not just at creation: the account may have been changed since.
+    const plan = await Plan.findById(commitment.planId);
+    if (plan) await assertCanStartCommitment(user, plan.problemIds);
 
     const existing = await CommitmentTransaction.findOne({
       commitmentId: commitment._id,

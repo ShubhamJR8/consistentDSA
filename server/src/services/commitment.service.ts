@@ -13,6 +13,7 @@ import { isDuplicateKeyError } from '../utils/mongo.js';
 import { CommitmentDto, getOwnedCommitment, toCommitmentDto } from './commitment.shared.js';
 import { CommitmentRules } from './commitmentRules.service.js';
 import { DailyProgressService } from './dailyProgress.service.js';
+import { assertCanStartCommitment } from './leetcodeRequirement.service.js';
 
 export interface LedgerTransactionDto {
   id: string;
@@ -73,6 +74,8 @@ export class CommitmentService {
     if (totalProblems === 0) {
       throw ApiError.badRequest('PLAN_EMPTY', 'This plan has no problems yet.');
     }
+
+    await assertCanStartCommitment(user, plan.problemIds);
 
     // A commitment always covers every problem in the plan; duration is never a separate choice,
     // it's just how many days that takes at the chosen daily pace, rounded up so the last day
@@ -189,6 +192,11 @@ export class CommitmentService {
         'Only a commitment awaiting payment can be activated.'
       );
     }
+    const [user, plan] = await Promise.all([
+      User.findById(userId),
+      Plan.findById(commitment.planId),
+    ]);
+    if (user && plan) await assertCanStartCommitment(user, plan.problemIds);
     return this.activate(commitment, now);
   }
 

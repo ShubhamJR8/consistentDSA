@@ -80,6 +80,8 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
   };
 
   const percent = options.rules.forfeiturePerMissedDay;
+  // Mirrors the server's check; the server still enforces it on create, payment and activation.
+  const needsLeetCode = plan?.requiresLeetCode === true && !user?.leetcodeUsername;
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -202,6 +204,19 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
           )}
       </div>
 
+      {needsLeetCode && step === STEP_TITLES.length - 1 && (
+        <p
+          role="alert"
+          className="mt-4 rounded-lg border border-border-muted bg-surface-200 px-3 py-2 text-sm text-zinc-300"
+        >
+          This plan is verified through LeetCode. Connect and verify your account before you can
+          start.{' '}
+          <Link to="/settings" className="text-primary hover:underline">
+            Connect LeetCode
+          </Link>
+        </p>
+      )}
+
       {create.error && (
         <p
           role="alert"
@@ -237,7 +252,12 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
             Continue
           </Button>
         ) : (
-          <Button className="flex-1 sm:flex-none" loading={create.isPending} onClick={submit}>
+          <Button
+            className="flex-1 sm:flex-none"
+            loading={create.isPending}
+            disabled={needsLeetCode}
+            onClick={submit}
+          >
             Commit {depositAmount !== null ? formatINR(depositAmount) : ''}
           </Button>
         )}

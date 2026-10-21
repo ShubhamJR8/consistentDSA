@@ -9,6 +9,7 @@ import {
   ILeetCodeEvidence,
 } from '../models/dailyProgress.model.js';
 import { Problem } from '../models/problem.model.js';
+import { User } from '../models/user.model.js';
 import { ApiError } from '../utils/apiError.js';
 import { addDays, dayKeyFor, endOfDay } from '../utils/localDate.js';
 import {
@@ -18,6 +19,7 @@ import {
   toCommitmentDto,
 } from './commitment.shared.js';
 import { completionVerification } from './completionVerification.service.js';
+import { hasVerifiedLeetCode, isInVerificationGrace } from './leetcodeRequirement.service.js';
 import { ProblemDto, toProblemDto } from './problem.service.js';
 import { queueRefundIfEligible } from './settlement.service.js';
 
@@ -26,6 +28,8 @@ export type Phase = 'NOT_STARTED' | 'IN_PROGRESS' | 'ENDED';
 export interface TodayProblemDto extends ProblemDto {
   completed: boolean;
   completedAt: Date | null;
+  /** How it was checked off (e.g. 'LEETCODE' = verified against the user's LeetCode account). */
+  completionMethod: CompletionMethod | null;
 }
 
 export interface TodayDto {
@@ -130,11 +134,28 @@ export class DailyProgressService {
     if (commitment.status !== 'ACTIVE') return;
 
     const todayKey = dayKeyFor(now, commitment.timezone);
-    const newlyMissed = await DailyProgress.find({
+    const overdue = await DailyProgress.find({
       commitmentId: commitment._id,
       status: 'PENDING',
       date: { $lt: todayKey },
-    }).select('date');
+    });
+
+    // Verified-account users get a short grace after the deadline for the LeetCode verifier to
+    // catch up (see env LEETCODE_GRACE_*). A day is only held back while it still has LeetCode
+    // problems to check, and never past the hard cap — provider trouble can delay a MISSED, not
+    // cause one.
+    let newlyMissed = overdue;
+    if (overdue.length > 0) {
+      const user = await User.findById(commitment.userId).select(
+        'leetcodeUsername leetcodeVerifiedAt'
+      );
+      if (user && hasVerifiedLeetCode(user)) {
+        newlyMissed = [];
+        for (const day of overdue) {
+          if (!(await isInVerificationGrace(day, commitment.timezone, now))) newlyMissed.push(day);
+        }
+      }
+    }
 
     if (newlyMissed.length > 0) {
       await DailyProgress.updateMany(
@@ -274,6 +295,18 @@ export class DailyProgressService {
           'This problem needs a passing code submission — open it and submit your solution.'
         );
       }
+      // With a verified LeetCode account, LeetCode problems are checked off only by a matching
+      // Accepted submission. (Commitments started before verification was required, with no
+      // verified account, keep the manual tick.)
+      if (problem?.source === 'LeetCode') {
+        const user = await User.findById(userId).select('leetcodeUsername leetcodeVerifiedAt');
+        if (user && hasVerifiedLeetCode(user)) {
+          throw ApiError.badRequest(
+            'LEETCODE_VERIFICATION_ONLY',
+            'This problem is checked off automatically once your Accepted submission is found — use Check submission.'
+          );
+        }
+      }
       await this.recordCompletion(progress._id, problemId, 'SELF_REPORTED', now);
     } else {
       await DailyProgress.updateOne({ _id: progress._id, status: 'PENDING' }, [
@@ -283,7 +316,14 @@ export class DailyProgressService {
               $filter: {
                 input: '$problemCompletions',
                 as: 'completion',
-                cond: { $ne: ['$$completion.problemId', problemId] },
+                // Only a manual tick can be taken back; completions proven by Judge0 or a LeetCode
+                // submission are evidence and stay.
+                cond: {
+                  $or: [
+                    { $ne: ['$$completion.problemId', problemId] },
+                    { $ne: ['$$completion.method', 'SELF_REPORTED'] },
+                  ],
+                },
               },
             },
           },
@@ -334,6 +374,35 @@ export class DailyProgressService {
     return this.buildToday(commitment, now);
   }
 
+  /** Completes a PENDING day (today's, or one still in its verification grace) once every assigned
+   *  problem is checked off, then recomputes streaks/attendance through reconcile(). Idempotent.
+   *  Returns whether the day is COMPLETED. */
+  static async finalizeDay(
+    commitment: ICommitment,
+    progress: IDailyProgress,
+    now: Date
+  ): Promise<boolean> {
+    if (progress.status === 'COMPLETED') return true;
+    const verification = await completionVerification.verifyDailyCompletion(progress);
+    if (!verification.verified) return false;
+
+    // Stamped with the last solve, not "now": a day finalized in its grace period was still
+    // completed inside the day.
+    const completedAt = new Date(
+      Math.max(...progress.problemCompletions.map((c) => c.completedAt.getTime()))
+    );
+    await DailyProgress.updateOne(
+      {
+        _id: progress._id,
+        status: 'PENDING',
+        completedProblems: { $gte: progress.requiredProblems },
+      },
+      { $set: { status: 'COMPLETED', completedAt } }
+    );
+    await this.reconcile(commitment, now);
+    return (await DailyProgress.exists({ _id: progress._id, status: 'COMPLETED' })) !== null;
+  }
+
   static async getProgress(
     userId: string,
     commitmentId: string,
@@ -359,6 +428,9 @@ export class DailyProgressService {
         const completedAtById = new Map(
           row.problemCompletions.map((c) => [c.problemId.toString(), c.completedAt])
         );
+        const methodById = new Map(
+          row.problemCompletions.map((c) => [c.problemId.toString(), c.method])
+        );
         const dayProblems: TodayProblemDto[] = [];
         for (const id of row.problemIds) {
           const problem = byId.get(id.toString());
@@ -368,6 +440,7 @@ export class DailyProgressService {
             ...toProblemDto(problem),
             completed: completedAt !== null,
             completedAt,
+            completionMethod: methodById.get(id.toString()) ?? null,
           });
         }
 
@@ -478,13 +551,21 @@ export class DailyProgressService {
     const completedAtById = new Map(
       progress.problemCompletions.map((c) => [c.problemId.toString(), c.completedAt])
     );
+    const methodById = new Map(
+      progress.problemCompletions.map((c) => [c.problemId.toString(), c.method])
+    );
 
     const items: TodayProblemDto[] = [];
     for (const id of progress.problemIds) {
       const problem = byId.get(id.toString());
       if (!problem) continue;
       const completedAt = completedAtById.get(id.toString()) ?? null;
-      items.push({ ...toProblemDto(problem), completed: completedAt !== null, completedAt });
+      items.push({
+        ...toProblemDto(problem),
+        completed: completedAt !== null,
+        completedAt,
+        completionMethod: methodById.get(id.toString()) ?? null,
+      });
     }
 
     return {

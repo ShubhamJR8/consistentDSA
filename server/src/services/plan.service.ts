@@ -2,6 +2,7 @@ import { IPlan, Plan, PlanLevel } from '../models/plan.model.js';
 import { Problem } from '../models/problem.model.js';
 import { ApiError } from '../utils/apiError.js';
 import { isObjectIdString } from '../utils/mongo.js';
+import { requiresLeetCode } from './leetcodeRequirement.service.js';
 import { ProblemDto, toProblemDto } from './problem.service.js';
 
 export interface PlanSummaryDto {
@@ -12,13 +13,15 @@ export interface PlanSummaryDto {
   topic: string | null;
   level: PlanLevel | null;
   problemCount: number;
+  /** True if starting this plan needs a verified LeetCode account. */
+  requiresLeetCode: boolean;
 }
 
 export interface PlanDetailDto extends PlanSummaryDto {
   problems: ProblemDto[];
 }
 
-const toPlanSummary = (plan: IPlan): PlanSummaryDto => ({
+const toPlanSummary = async (plan: IPlan): Promise<PlanSummaryDto> => ({
   id: plan._id.toString(),
   name: plan.name,
   slug: plan.slug,
@@ -26,12 +29,13 @@ const toPlanSummary = (plan: IPlan): PlanSummaryDto => ({
   topic: plan.topic,
   level: plan.level,
   problemCount: plan.problemIds.length,
+  requiresLeetCode: await requiresLeetCode(plan.problemIds),
 });
 
 export class PlanService {
   static async list(): Promise<PlanSummaryDto[]> {
     const plans = await Plan.find({ active: true }).sort({ order: 1 });
-    return plans.map(toPlanSummary);
+    return Promise.all(plans.map(toPlanSummary));
   }
 
   static async getById(id: string): Promise<PlanDetailDto> {
@@ -45,6 +49,6 @@ export class PlanService {
       .filter((p): p is NonNullable<typeof p> => p !== undefined)
       .map(toProblemDto);
 
-    return { ...toPlanSummary(plan), problems: ordered };
+    return { ...(await toPlanSummary(plan)), problems: ordered };
   }
 }

@@ -20,12 +20,33 @@ const envSchema = z
     JUDGE0_API_URL: z.string().url().optional(),
     JUDGE0_API_KEY: z.string().optional(),
     JUDGE0_API_HOST: z.string().default('judge0-ce.p.rapidapi.com'),
-    // LeetCode-based verification: no credentials, just a public-username lookup against LeetCode's
-    // own recent-Accepted-submissions data. Disabled by default — the manual "Check Submission"
-    // route works regardless; this only controls the periodic background sweep.
-    LEETCODE_VERIFICATION_ENABLED: z.coerce.boolean().default(false),
+    // LeetCode verification runs against Alfa (https://github.com/alfaarghya/alfa-leetcode-api), an
+    // UNOFFICIAL third-party wrapper around LeetCode's public data. Its availability and whether
+    // LeetCode permits this use are not guaranteed — keep it behind the integration client so it can
+    // be switched off or replaced. No user credentials are ever involved. The background sweep is
+    // off by default; the manual "Check submission" route works regardless.
+    LEETCODE_VERIFICATION_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
     LEETCODE_VERIFICATION_INTERVAL_MINUTES: z.coerce.number().default(5),
-    LEETCODE_CACHE_TTL_SECONDS: z.coerce.number().default(60),
+    LEETCODE_API_BASE_URL: z.string().url().default('https://alfa-leetcode-api.onrender.com'),
+    // Render's free tier cold-starts slowly, so this is generous; a timeout is just a retryable error.
+    LEETCODE_API_TIMEOUT_MS: z.coerce.number().default(15000),
+    LEETCODE_API_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(3),
+    // Alfa caps this at 20 regardless of what's requested (verified against the hosted API).
+    LEETCODE_SUBMISSIONS_LIMIT: z.coerce.number().int().min(1).max(20).default(20),
+    LEETCODE_CACHE_TTL_SECONDS: z.coerce.number().default(30),
+    // After a day's deadline, a day that still has unchecked LeetCode problems (for a user with a
+    // verified account) is not marked MISSED until this long has passed, so the verifier gets a
+    // chance to find a solve from just before the deadline. Solves must still fall inside the day.
+    // If the last check was inconclusive (provider down / history truncated) the wait extends to the
+    // hard cap below. Neither delays or changes anything for days with nothing left to verify.
+    LEETCODE_GRACE_MINUTES: z.coerce.number().min(0).default(30),
+    LEETCODE_GRACE_OUTAGE_MAX_HOURS: z.coerce.number().min(0).default(6),
+    LEETCODE_CHALLENGE_TTL_MINUTES: z.coerce.number().default(10),
+    LEETCODE_CHALLENGE_RATE_LIMIT: z.coerce.number().default(5),
+    LEETCODE_VERIFY_RATE_LIMIT: z.coerce.number().default(10),
     // Finalizes ACTIVE commitments past their last day and queues (never executes) their refund —
     // safe to run always since it never calls Razorpay. See jobs/commitmentSettlement.job.ts.
     COMMITMENT_SETTLEMENT_INTERVAL_MINUTES: z.coerce.number().default(15),

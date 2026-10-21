@@ -7,7 +7,7 @@ import { env } from './config/env.js';
 import authRoutes from './routes/auth.routes.js';
 import commitmentRoutes from './routes/commitment.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
-import userRoutes from './routes/user.routes.js';
+import leetCodeIntegrationRoutes from './routes/leetcodeIntegration.routes.js';
 import { planRoutes, problemRoutes } from './routes/catalog.routes.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { ApiError } from './utils/apiError.js';
@@ -57,7 +57,7 @@ export const createApp = (): Express => {
 
   // API Routes
   app.use('/api/auth', authRoutes);
-  app.use('/api/users', userRoutes);
+  app.use('/api/integrations/leetcode', leetCodeIntegrationRoutes);
   app.use('/api/problems', problemRoutes);
   app.use('/api/plans', planRoutes);
   app.use('/api/commitments', commitmentRoutes);

@@ -22,6 +22,8 @@ export interface PlanSummary {
   topic: string | null;
   level: PlanLevel | null;
   problemCount: number;
+  /** True if starting this plan needs a verified LeetCode account. */
+  requiresLeetCode: boolean;
 }
 
 export interface Problem {
@@ -85,6 +87,8 @@ export interface TodayProblem {
   judgeEnabled: boolean;
   completed: boolean;
   completedAt: string | null;
+  /** How it was checked off; 'LEETCODE' = verified against the user's LeetCode account. */
+  completionMethod: 'SELF_REPORTED' | 'JUDGE0' | 'LEETCODE' | null;
 }
 
 export interface TodayDetails {
@@ -122,12 +126,26 @@ export interface ProgressResponse {
   days: ProgressDay[];
 }
 
+export type ProblemVerificationStatus =
+  'VERIFIED' | 'PENDING' | 'TEMPORARILY_UNAVAILABLE' | 'CONFIGURATION_ERROR';
+
+export interface ProblemVerification {
+  problemId: string;
+  slug: string;
+  status: ProblemVerificationStatus;
+  /** 'history_truncated' = LeetCode's recent-submissions window may have hidden an older solve. */
+  reason?: string;
+}
+
 export interface LeetCodeVerifyResult {
   checkedAt: string;
   /** False if LeetCode couldn't be reached this call — nothing was marked missed because of it. */
   providerAvailable: boolean;
+  /** True when this check finished the last outstanding problem and completed the day. */
+  dayCompleted: boolean;
   verifiedProblemIds: string[];
   stillPendingProblemIds: string[];
+  problems: ProblemVerification[];
 }
 
 export interface PaymentOrder {
