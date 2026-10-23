@@ -24,6 +24,7 @@ router.post(
   validate(recordProblemSchema),
   CommitmentController.recordProblem
 );
+router.post('/:id/cancel', CommitmentController.cancel);
 router.post('/:id/daily-progress/complete', CommitmentController.completeDay);
 router.post('/:id/verify-today', LeetCodeVerificationController.verifyToday);
 router.post(

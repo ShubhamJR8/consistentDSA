@@ -44,6 +44,13 @@ export class ApiError extends Error {
     return new ApiError(429, code, message);
   }
 
+  static serviceUnavailable(
+    code: string = 'SERVICE_UNAVAILABLE',
+    message: string = 'Service temporarily unavailable'
+  ): ApiError {
+    return new ApiError(503, code, message);
+  }
+
   static internal(
     code: string = 'INTERNAL_ERROR',
     message: string = 'Internal server error'

@@ -22,3 +22,7 @@ export const endOfDay = (dayKey: string, timezone: string): Date =>
 /** The first instant (00:00:00.000) of a calendar day in `timezone`. */
 export const startOfDay = (dayKey: string, timezone: string): Date =>
   DateTime.fromISO(dayKey, { zone: timezone }).startOf('day').toJSDate();
+
+/** Whole-and-fractional hours left in the calendar day that `instant` falls on in `timezone`. */
+export const hoursLeftInDay = (instant: Date, timezone: string): number =>
+  (endOfDay(dayKeyFor(instant, timezone), timezone).getTime() - instant.getTime()) / 3_600_000;

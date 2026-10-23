@@ -5,7 +5,9 @@ export interface User {
   timezone: string;
   role: 'USER' | 'ADMIN';
   createdAt: string;
+  /** Only set once the user has proven they own the account. */
   leetcodeUsername: string | null;
+  leetcodeVerifiedAt: string | null;
   emailVerified: boolean;
 }
 

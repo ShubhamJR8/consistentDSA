@@ -1,6 +1,19 @@
+import { env } from '../config/env.js';
 import { Commitment, CommitmentStatus, ICommitment } from '../models/commitment.model.js';
 import { ApiError } from '../utils/apiError.js';
+import { addDays, dayKeyFor, hoursLeftInDay } from '../utils/localDate.js';
 import { isObjectIdString } from '../utils/mongo.js';
+
+/** The day Day 1 falls on if the commitment is activated at `now`: today, unless too little of today
+ *  is left to be a fair day (see PAYMENT_MIN_START_HOURS), in which case tomorrow. */
+export const resolveStartDate = (
+  now: Date,
+  timezone: string,
+  minHours: number = env.PAYMENT_MIN_START_HOURS
+): string => {
+  const today = dayKeyFor(now, timezone);
+  return hoursLeftInDay(now, timezone) < minHours ? addDays(today, 1) : today;
+};
 
 export interface CommitmentDto {
   id: string;
@@ -10,6 +23,8 @@ export interface CommitmentDto {
   timezone: string;
   startDate: string | null;
   endDate: string | null;
+  /** Only while awaiting payment: the day Day 1 would start if payment landed right now. */
+  projectedStartDate: string | null;
   durationDays: number;
   dailyTarget: number;
   totalProblems: number;
@@ -36,6 +51,10 @@ export const toCommitmentDto = (commitment: ICommitment): CommitmentDto => ({
   timezone: commitment.timezone,
   startDate: commitment.startDate,
   endDate: commitment.endDate,
+  projectedStartDate:
+    commitment.status === 'PENDING_PAYMENT'
+      ? resolveStartDate(new Date(), commitment.timezone)
+      : null,
   durationDays: commitment.durationDays,
   dailyTarget: commitment.dailyTarget,
   totalProblems: commitment.totalProblems,

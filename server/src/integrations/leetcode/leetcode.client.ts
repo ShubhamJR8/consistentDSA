@@ -1,107 +1,296 @@
+import { z } from 'zod';
 import { env } from '../../config/env.js';
 
-// All LeetCode-specific wire format lives in this file. Nothing outside it should know the shape
-// of LeetCode's GraphQL responses — if LeetCode changes its endpoint, only this file changes.
+// All provider-specific HTTP and wire-format handling lives in this file; nothing outside it should
+// know what Alfa's responses look like.
+//
+// NOTE: Alfa (https://github.com/alfaarghya/alfa-leetcode-api) is an UNOFFICIAL third-party wrapper
+// around LeetCode's public data. Its availability — and whether LeetCode permits this use — is not
+// guaranteed. Keep it isolated so it can be disabled or swapped for an official integration.
+//
+// Observed behaviour of the hosted API (inspected, not documented guarantees):
+//  - GET /{user} → flat JSON with `username` and `about` (plain string, "" when empty). A missing
+//    user still returns HTTP 200, with `{ errors: [...], data: { matchedUser: null } }`.
+//  - GET /{user}/acSubmission?limit=N → `{ count, submission: [{ title, titleSlug, timestamp,
+//    statusDisplay, lang }] }`, newest first. `timestamp` is epoch SECONDS as a string. There is no
+//    submission id. The list is capped at 20 even when a larger limit is requested, and a missing
+//    user is indistinguishable from a user with no submissions.
 
-export interface LeetCodeSubmission {
-  id?: string;
+export interface LeetCodeProfile {
+  username: string;
+  about: string;
+}
+
+export interface LeetCodeAcceptedSubmission {
   title: string;
   titleSlug: string;
-  statusDisplay: string;
-  /** Milliseconds since epoch. */
+  /** Milliseconds since epoch (converted from the provider's seconds). */
   timestamp: number;
   language?: string;
 }
 
-export interface LeetCodeClient {
-  /**
-   * Recent Accepted submissions for a public username, newest first. Resolves to `null` if the
-   * username doesn't exist on LeetCode at all (as opposed to existing with zero submissions,
-   * which is `[]`) — callers use that distinction to give a clear "check the username" message.
-   */
-  getRecentSubmissions(username: string): Promise<LeetCodeSubmission[] | null>;
+export interface AcceptedSubmissionsResult {
+  /** Newest first, Accepted only. */
+  submissions: LeetCodeAcceptedSubmission[];
+  /** The number of entries we asked the provider for. Hitting it means older ones may be cut off. */
+  limit: number;
 }
 
-const GRAPHQL_URL = 'https://leetcode.com/graphql';
+/** The provider failed or answered with something we can't trust. Always retryable — never evidence
+ *  that the user did or didn't do anything. `message` is for server logs only. */
+export class LeetCodeProviderError extends Error {
+  /** Set when the provider told us to back off (HTTP 429): seconds until it's worth trying again. */
+  readonly retryAfterSeconds?: number;
 
-// recentAcSubmissionList only ever contains Accepted runs (that's what "Ac" means here), so we
-// don't need the general recentSubmissionList endpoint — which also normally requires an
-// authenticated session to read for private profiles. Bundling matchedUser in the same request
-// lets us tell "no submissions yet" apart from "this username doesn't exist" in one round trip.
-const QUERY = `
-  query commitDsaRecentSubmissions($username: String!, $limit: Int!) {
-    matchedUser(username: $username) {
-      username
-    }
-    recentAcSubmissionList(username: $username, limit: $limit) {
-      id
-      title
-      titleSlug
-      timestamp
-    }
+  constructor(message: string, options?: { cause?: unknown; retryAfterSeconds?: number }) {
+    super(message, options);
+    this.name = 'LeetCodeProviderError';
+    this.retryAfterSeconds = options?.retryAfterSeconds;
   }
-`;
-
-interface GraphQLResponse {
-  data?: {
-    matchedUser: { username: string } | null;
-    recentAcSubmissionList: { id: string; title: string; titleSlug: string; timestamp: string }[] | null;
-  };
-  errors?: unknown[];
 }
+
+export interface LeetCodeClient {
+  /** Resolves `null` when the username doesn't exist on LeetCode. Throws LeetCodeProviderError when
+   *  the provider is unreachable or returns an unexpected shape. */
+  getProfile(username: string): Promise<LeetCodeProfile | null>;
+  getAcceptedSubmissions(username: string, limit?: number): Promise<AcceptedSubmissionsResult>;
+}
+
+// Matches the validation applied at the API boundary; re-checked here so no caller can build a URL
+// from an unvalidated string.
+export const LEETCODE_USERNAME_PATTERN = /^[A-Za-z0-9_-]{1,50}$/;
+
+const MAX_ABOUT_LENGTH = 20_000;
+
+const profileSchema = z.object({
+  username: z.string().min(1),
+  // null/"" both mean "empty"; a missing or non-string field means the shape changed.
+  about: z.string().nullable(),
+});
+
+const notFoundSchema = z.object({
+  errors: z.array(z.unknown()).min(1),
+  data: z.object({ matchedUser: z.null() }).passthrough(),
+});
+
+const submissionsSchema = z.object({
+  submission: z.array(
+    z.object({
+      title: z.string(),
+      titleSlug: z.string().min(1),
+      timestamp: z.union([z.string(), z.number()]),
+      statusDisplay: z.string(),
+      lang: z.string().optional(),
+    })
+  ),
+});
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const RETRYABLE_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
+
+/** GETs `path` on the configured base URL with a timeout and bounded exponential backoff. Only
+ *  network errors, timeouts and 408/425/429/5xx are retried; the rest fail immediately. */
+// Alfa's hosted instance allows 120 requests/hour per IP and answers 429 with Retry-After beyond
+// that. Once told to back off we stop calling entirely until then, rather than burning attempts
+// (or the sweep's requests) against a limit that is already hit.
+let blockedUntil = 0;
+const DEFAULT_BACKOFF_SECONDS = 60;
+const MAX_BACKOFF_SECONDS = 3600;
+
+const backoffError = (): LeetCodeProviderError =>
+  new LeetCodeProviderError('Alfa rate limit reached', {
+    retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000)),
+  });
+
+// Rolling-hour request budget, so this server never spends more than its share of the provider's
+// per-IP limit (and a burst from the sweep can't lock out users clicking "Check submission").
+const HOUR_MS = 3_600_000;
+const requestTimes: number[] = [];
+
+const pruneRequests = (now: number): void => {
+  while (requestTimes.length > 0 && now - requestTimes[0] >= HOUR_MS) requestTimes.shift();
+};
+
+const budgetError = (now: number): LeetCodeProviderError =>
+  new LeetCodeProviderError('Local request budget exhausted', {
+    retryAfterSeconds: Math.max(1, Math.ceil((requestTimes[0] + HOUR_MS - now) / 1000)),
+  });
+
+// What the provider has been doing lately, for the health endpoint and outage alerts.
+let lastSuccessAt: number | null = null;
+let failingSince: number | null = null;
+let consecutiveFailures = 0;
+
+const recordSuccess = (): void => {
+  lastSuccessAt = Date.now();
+  failingSince = null;
+  consecutiveFailures = 0;
+};
+const recordFailure = (): void => {
+  failingSince ??= Date.now();
+  consecutiveFailures += 1;
+};
+
+export interface LeetCodeProviderStatus {
+  state: 'unknown' | 'ok' | 'down';
+  lastSuccessAt: Date | null;
+  failingSince: Date | null;
+  consecutiveFailures: number;
+  budget: { limit: number; used: number; remaining: number };
+}
+
+export const getLeetCodeProviderStatus = (): LeetCodeProviderStatus => {
+  pruneRequests(Date.now());
+  const limit = env.LEETCODE_API_HOURLY_BUDGET;
+  return {
+    state: failingSince !== null ? 'down' : lastSuccessAt !== null ? 'ok' : 'unknown',
+    lastSuccessAt: lastSuccessAt === null ? null : new Date(lastSuccessAt),
+    failingSince: failingSince === null ? null : new Date(failingSince),
+    consecutiveFailures,
+    budget: {
+      limit,
+      used: requestTimes.length,
+      remaining: limit === 0 ? Number.POSITIVE_INFINITY : Math.max(0, limit - requestTimes.length),
+    },
+  };
+};
+
+const getJson = async (path: string): Promise<unknown> => {
+  if (Date.now() < blockedUntil) throw backoffError();
+  const url = new URL(path, env.LEETCODE_API_BASE_URL);
+  let lastError: LeetCodeProviderError = new LeetCodeProviderError('Alfa request failed');
+
+  for (let attempt = 1; attempt <= env.LEETCODE_API_MAX_ATTEMPTS; attempt += 1) {
+    const now = Date.now();
+    pruneRequests(now);
+    if (
+      env.LEETCODE_API_HOURLY_BUDGET > 0 &&
+      requestTimes.length >= env.LEETCODE_API_HOURLY_BUDGET
+    ) {
+      throw budgetError(now);
+    }
+    requestTimes.push(now);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), env.LEETCODE_API_TIMEOUT_MS);
+    let retryable = true;
+    try {
+      const res = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const body = (await res.json()) as unknown;
+        recordSuccess();
+        return body;
+      }
+      if (res.status === 429) {
+        recordFailure();
+        const header = Number(res.headers.get('retry-after'));
+        const seconds = Number.isFinite(header) && header > 0 ? header : DEFAULT_BACKOFF_SECONDS;
+        blockedUntil = Date.now() + Math.min(seconds, MAX_BACKOFF_SECONDS) * 1000;
+        throw backoffError();
+      }
+      lastError = new LeetCodeProviderError(`Alfa responded with HTTP ${res.status}`);
+      retryable = RETRYABLE_STATUSES.has(res.status);
+      recordFailure();
+    } catch (error) {
+      if (error instanceof LeetCodeProviderError) {
+        // Our own backoff signal: keep it intact and don't retry into a limit we just hit.
+        throw error;
+      }
+      lastError = new LeetCodeProviderError('Alfa request failed', { cause: error });
+      recordFailure();
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!retryable || attempt === env.LEETCODE_API_MAX_ATTEMPTS) break;
+    await sleep(500 * 2 ** (attempt - 1));
+  }
+  throw lastError;
+};
+
+const assertUsername = (username: string): string => {
+  if (!LEETCODE_USERNAME_PATTERN.test(username)) {
+    throw new LeetCodeProviderError('Invalid LeetCode username');
+  }
+  return encodeURIComponent(username);
+};
+
+export const parseProfile = (payload: unknown): LeetCodeProfile | null => {
+  if (notFoundSchema.safeParse(payload).success) return null;
+  const parsed = profileSchema.safeParse(payload);
+  if (!parsed.success) throw new LeetCodeProviderError('Unexpected Alfa profile schema');
+  return {
+    username: parsed.data.username,
+    about: (parsed.data.about ?? '').slice(0, MAX_ABOUT_LENGTH),
+  };
+};
+
+export const parseAcceptedSubmissions = (
+  payload: unknown,
+  limit: number
+): AcceptedSubmissionsResult => {
+  const parsed = submissionsSchema.safeParse(payload);
+  if (!parsed.success) throw new LeetCodeProviderError('Unexpected Alfa submissions schema');
+
+  const submissions: LeetCodeAcceptedSubmission[] = [];
+  for (const item of parsed.data.submission) {
+    const seconds = Number(item.timestamp);
+    // A malformed timestamp means we can't reason about this list at all — fail the whole call
+    // rather than silently skip an entry that might have been the one that mattered.
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      throw new LeetCodeProviderError('Unexpected Alfa submission timestamp');
+    }
+    // The endpoint is documented as Accepted-only; enforce it anyway.
+    if (item.statusDisplay !== 'Accepted') continue;
+    submissions.push({
+      title: item.title,
+      titleSlug: item.titleSlug,
+      timestamp: seconds * 1000,
+      language: item.lang,
+    });
+  }
+  return { submissions, limit };
+};
 
 interface CacheEntry {
-  value: LeetCodeSubmission[] | null;
+  value: AcceptedSubmissionsResult;
   expiresAt: number;
 }
 
-// A small in-memory cache is enough to keep the manual "Check Submission" button and the
-// background sweep from hammering LeetCode when both hit the same user in quick succession.
-const cache = new Map<string, CacheEntry>();
+// Short-lived, success-only cache so the manual button and the background sweep don't hammer the
+// provider when they hit the same user back to back.
+const submissionsCache = new Map<string, CacheEntry>();
 
-const fetchRecentSubmissions = async (username: string): Promise<LeetCodeSubmission[] | null> => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
-
-  let res: Response;
-  try {
-    res = await fetch(GRAPHQL_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Referer: 'https://leetcode.com' },
-      body: JSON.stringify({ query: QUERY, variables: { username, limit: 20 } }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    throw new Error('LeetCode is unreachable', { cause: error });
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  if (!res.ok) throw new Error(`LeetCode responded with ${res.status}`);
-
-  const payload = (await res.json()) as GraphQLResponse;
-  if ((payload.errors && payload.errors.length > 0) || !payload.data) {
-    throw new Error('LeetCode GraphQL request failed');
-  }
-  if (!payload.data.matchedUser) return null;
-
-  return (payload.data.recentAcSubmissionList ?? []).map((item) => ({
-    id: item.id,
-    title: item.title,
-    titleSlug: item.titleSlug,
-    statusDisplay: 'Accepted',
-    timestamp: Number(item.timestamp) * 1000,
-  }));
+export const clearLeetCodeCache = (): void => {
+  submissionsCache.clear();
+  blockedUntil = 0;
+  requestTimes.length = 0;
+  lastSuccessAt = null;
+  failingSince = null;
+  consecutiveFailures = 0;
 };
 
 export const leetCodeClient: LeetCodeClient = {
-  async getRecentSubmissions(username) {
-    const key = username.toLowerCase();
-    const cached = cache.get(key);
+  async getProfile(username) {
+    const payload = await getJson(`/${assertUsername(username)}`);
+    return parseProfile(payload);
+  },
+
+  async getAcceptedSubmissions(username, limit = env.LEETCODE_SUBMISSIONS_LIMIT) {
+    const safeName = assertUsername(username);
+    const key = `${username.toLowerCase()}:${limit}`;
+    const cached = submissionsCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
 
-    const value = await fetchRecentSubmissions(username);
-    cache.set(key, { value, expiresAt: Date.now() + env.LEETCODE_CACHE_TTL_SECONDS * 1000 });
+    const payload = await getJson(`/${safeName}/acSubmission?limit=${Math.trunc(limit)}`);
+    const value = parseAcceptedSubmissions(payload, limit);
+    submissionsCache.set(key, {
+      value,
+      expiresAt: Date.now() + env.LEETCODE_CACHE_TTL_SECONDS * 1000,
+    });
     return value;
   },
 };

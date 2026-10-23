@@ -80,6 +80,8 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
   };
 
   const percent = options.rules.forfeiturePerMissedDay;
+  // Mirrors the server's check; the server still enforces it on create, payment and activation.
+  const needsLeetCode = plan?.requiresLeetCode === true && !user?.leetcodeUsername;
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -188,7 +190,8 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
                   </li>
                   <li>
                     Day 1 starts today, the moment payment activates your commitment — its deadline
-                    is still 11:59 PM tonight in your timezone, so pay early in the day if you can.
+                    is 11:59 PM tonight in your timezone. If less than a few hours of today are left
+                    when you pay, Day 1 starts tomorrow instead.
                   </li>
                   <li>These rules are locked in when you commit and never change afterwards.</li>
                 </ul>
@@ -201,6 +204,19 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
             </>
           )}
       </div>
+
+      {needsLeetCode && step === STEP_TITLES.length - 1 && (
+        <p
+          role="alert"
+          className="mt-4 rounded-lg border border-border-muted bg-surface-200 px-3 py-2 text-sm text-zinc-300"
+        >
+          This plan is verified through LeetCode. Connect and verify your account before you can
+          start.{' '}
+          <Link to="/settings" className="text-primary hover:underline">
+            Connect LeetCode
+          </Link>
+        </p>
+      )}
 
       {create.error && (
         <p
@@ -237,7 +253,12 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
             Continue
           </Button>
         ) : (
-          <Button className="flex-1 sm:flex-none" loading={create.isPending} onClick={submit}>
+          <Button
+            className="flex-1 sm:flex-none"
+            loading={create.isPending}
+            disabled={needsLeetCode}
+            onClick={submit}
+          >
             Commit {depositAmount !== null ? formatINR(depositAmount) : ''}
           </Button>
         )}

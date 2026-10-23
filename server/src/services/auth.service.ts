@@ -10,7 +10,8 @@ import { env } from '../config/env.js';
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-const hashToken = (token: string): string => crypto.createHash('sha256').update(token).digest('hex');
+const hashToken = (token: string): string =>
+  crypto.createHash('sha256').update(token).digest('hex');
 
 const issueVerificationToken = async (user: IUser): Promise<void> => {
   const rawToken = crypto.randomBytes(32).toString('hex');
@@ -27,6 +28,7 @@ export interface AuthResponseUser {
   name: string;
   email: string;
   leetcodeUsername: string | null;
+  leetcodeVerifiedAt: Date | null;
   timezone: string;
   role: 'USER' | 'ADMIN';
   emailVerified: boolean;
@@ -44,7 +46,9 @@ export const formatUserResponse = (user: IUser): AuthResponseUser => ({
   email: user.email,
   timezone: user.timezone,
   role: user.role,
-  leetcodeUsername: user.leetcodeUsername ?? null,
+  // Only a username the user has proven they own counts as connected.
+  leetcodeUsername: user.leetcodeVerifiedAt ? (user.leetcodeUsername ?? null) : null,
+  leetcodeVerifiedAt: user.leetcodeVerifiedAt ?? null,
   emailVerified: user.emailVerified,
   createdAt: user.createdAt,
 });

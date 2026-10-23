@@ -20,6 +20,37 @@ export const authRateLimiter = rateLimit({
   // doesn't need per-test throttling workarounds.
   skip: () => env.NODE_ENV === 'test',
   handler: (_req, _res, next) => {
-    next(ApiError.tooManyRequests('AUTH_RATE_LIMITED', 'Too many attempts, please try again later'));
+    next(
+      ApiError.tooManyRequests('AUTH_RATE_LIMITED', 'Too many attempts, please try again later')
+    );
   },
 });
+
+// Per authenticated user (these routes sit behind requireAuth), so one account can't spam LeetCode
+// lookups or grind challenges. Not skipped in tests, so the limit itself is testable. In-memory:
+// with several server instances each keeps its own count (the limit is per instance).
+const perUser = (req: { user?: { userId: string } }): string => req.user?.userId ?? 'anonymous';
+
+const perUserLimiter = (limit: number, code: string) =>
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: perUser,
+    handler: (_req, _res, next) => {
+      next(ApiError.tooManyRequests(code, 'Too many attempts, please try again later'));
+    },
+  });
+
+export const leetCodeChallengeRateLimiter = perUserLimiter(
+  env.LEETCODE_CHALLENGE_RATE_LIMIT,
+  'LEETCODE_RATE_LIMITED'
+);
+export const leetCodeVerifyRateLimiter = perUserLimiter(
+  env.LEETCODE_VERIFY_RATE_LIMIT,
+  'LEETCODE_RATE_LIMITED'
+);
+
+// Order creation calls Razorpay and verification is the money path: cap both per user.
+export const paymentRateLimiter = perUserLimiter(30, 'PAYMENT_RATE_LIMITED');

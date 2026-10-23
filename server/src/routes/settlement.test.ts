@@ -7,6 +7,7 @@ vi.mock('../integrations/razorpay/razorpay.client.js', () => ({
   razorpayClient: {
     createOrder: vi.fn(),
     verifyCheckoutSignature: vi.fn(),
+    fetchPayment: vi.fn(),
     refund: vi.fn(),
   },
 }));
@@ -26,6 +27,7 @@ import { extractAuthCookie } from '../test-utils/authCookie.js';
 const mockIsConfigured = vi.mocked(isRazorpayConfigured);
 const mockCreateOrder = vi.mocked(razorpayClient.createOrder);
 const mockVerifySignature = vi.mocked(razorpayClient.verifyCheckoutSignature);
+const mockFetchPayment = vi.mocked(razorpayClient.fetchPayment);
 
 const TEST_DB = 'commit_dsa_test_settlement';
 
@@ -147,6 +149,13 @@ describe('Commitment settlement — refund queueing', () => {
     mockIsConfigured.mockReset().mockReturnValue(true);
     mockCreateOrder.mockReset();
     mockVerifySignature.mockReset();
+    // By convention a test's payment id is its order id with 'pay_' in place of 'order_'.
+    mockFetchPayment.mockReset().mockImplementation(async (id: string) => ({
+      id,
+      orderId: id.replace('pay_', 'order_'),
+      amount: 100000,
+      status: 'captured',
+    }));
   });
 
   // 2030-02-01 is a Friday in IST; the commitment above always runs 2030-02-01..03.

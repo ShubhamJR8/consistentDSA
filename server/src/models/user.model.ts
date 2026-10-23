@@ -9,6 +9,11 @@ export interface IUser extends Document {
   // Public username only — never a password, session cookie or auth token. Used to look up
   // recent Accepted submissions for LeetCode-based completion verification.
   leetcodeUsername?: string;
+  /** Set only after the user proved control of that LeetCode account (see leetcodeAccount.service).
+   *  A username without this is never used for verification. */
+  leetcodeVerifiedAt?: Date;
+  /** Lower-cased verified username; unique, so one LeetCode account serves only one user. */
+  leetcodeUsernameKey?: string;
   /** Bumped on every password reset; embedded in issued JWTs so resetting a password
    *  invalidates every session issued before it, not just future login attempts. */
   tokenVersion: number;
@@ -61,6 +66,13 @@ const UserSchema = new Schema<IUser>(
       trim: true,
       maxlength: [50, 'LeetCode username cannot exceed 50 characters'],
     },
+    leetcodeVerifiedAt: {
+      type: Date,
+    },
+    leetcodeUsernameKey: {
+      type: String,
+      select: false,
+    },
     tokenVersion: {
       type: Number,
       default: 0,
@@ -91,6 +103,8 @@ const UserSchema = new Schema<IUser>(
   }
 );
 
+// Sparse: users who haven't verified a LeetCode account have no key and never collide.
+UserSchema.index({ leetcodeUsernameKey: 1 }, { unique: true, sparse: true });
 UserSchema.index({ passwordResetTokenHash: 1 }, { sparse: true });
 UserSchema.index({ emailVerificationTokenHash: 1 }, { sparse: true });
 

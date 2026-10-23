@@ -1,7 +1,20 @@
 import nodemailer, { Transporter } from 'nodemailer';
 import { env } from '../config/env.js';
 
-const isEmailConfigured = (): boolean => Boolean(env.EMAIL_HOST && env.EMAIL_USER && env.EMAIL_PASS);
+const isEmailConfigured = (): boolean =>
+  Boolean(env.EMAIL_HOST && env.EMAIL_USER && env.EMAIL_PASS);
+
+// With no SMTP configured the link is printed so local flows work. A reset/verification link is a
+// credential: anyone who can read the logs could take over the account, so it is never printed in
+// production (where the server refuses to boot without SMTP anyway — see config/env.ts).
+const logLinkInsteadOfSending = (kind: string, to: string, link: string): void => {
+  if (env.NODE_ENV === 'production') {
+    console.error(`[Email] SMTP is not configured; ${kind} email to ${to} was not sent.`);
+    return;
+  }
+  console.log(`[Email] EMAIL_HOST not configured — ${kind} link for ${to}:`);
+  console.log(`[Email] ${link}`);
+};
 
 let transporter: Transporter | null = null;
 const getTransporter = (): Transporter => {
@@ -23,8 +36,7 @@ const getTransporter = (): Transporter => {
  */
 export const sendPasswordResetEmail = async (to: string, resetUrl: string): Promise<void> => {
   if (!isEmailConfigured()) {
-    console.log(`[Email] EMAIL_HOST not configured — password reset link for ${to}:`);
-    console.log(`[Email] ${resetUrl}`);
+    logLinkInsteadOfSending('password reset', to, resetUrl);
     return;
   }
 
@@ -40,8 +52,7 @@ export const sendPasswordResetEmail = async (to: string, resetUrl: string): Prom
 /** Same dev/no-SMTP fallback as sendPasswordResetEmail — logs the link instead of emailing it. */
 export const sendVerificationEmail = async (to: string, verifyUrl: string): Promise<void> => {
   if (!isEmailConfigured()) {
-    console.log(`[Email] EMAIL_HOST not configured — verification link for ${to}:`);
-    console.log(`[Email] ${verifyUrl}`);
+    logLinkInsteadOfSending('verification', to, verifyUrl);
     return;
   }
 

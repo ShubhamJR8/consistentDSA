@@ -36,6 +36,10 @@ export class CommitmentController {
     );
   });
 
+  static cancel = asyncHandler(async (req, res) => {
+    sendSuccess(res, await CommitmentService.cancelUnpaid(req.user!.userId, req.params.id));
+  });
+
   static completeDay = asyncHandler(async (req, res) => {
     sendSuccess(res, await DailyProgressService.completeDay(req.user!.userId, req.params.id));
   });

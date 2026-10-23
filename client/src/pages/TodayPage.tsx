@@ -11,8 +11,50 @@ import {
   useToday,
   useVerifyToday,
 } from '../hooks/useCommitments';
+import type { LeetCodeVerifyResult, TodayProblem } from '../types/commitment';
 import { todayMessage } from '../utils/commitment';
 import { formatDayKey, formatDeadline } from '../utils/format';
+
+interface VerificationLine {
+  text: string;
+  done: boolean;
+}
+
+/** Each problem gets its own status — one being verified says nothing about the others. */
+const verificationLine = (
+  problem: TodayProblem,
+  result: LeetCodeVerifyResult | undefined,
+  checking: boolean,
+  connected: boolean
+): VerificationLine => {
+  if (problem.completed) {
+    return {
+      text:
+        problem.completionMethod === 'LEETCODE' ? 'Completed — verified on LeetCode' : 'Completed',
+      done: true,
+    };
+  }
+  if (!connected) return { text: 'Account connection required', done: false };
+  if (checking) return { text: 'Verifying…', done: false };
+
+  const outcome = result?.problems.find((p) => p.problemId === problem.id);
+  switch (outcome?.status) {
+    case 'TEMPORARILY_UNAVAILABLE':
+      return { text: 'Verification temporarily unavailable', done: false };
+    case 'CONFIGURATION_ERROR':
+      return { text: "Can't be verified automatically", done: false };
+    case 'PENDING':
+      return {
+        text:
+          outcome.reason === 'history_truncated'
+            ? 'Waiting for an Accepted submission (we can only see your latest 20 — check again soon)'
+            : 'Waiting for an Accepted submission',
+        done: false,
+      };
+    default:
+      return { text: 'Waiting for an Accepted submission', done: false };
+  }
+};
 
 const BackLink = () => (
   <Link
@@ -71,6 +113,8 @@ export function TodayPage() {
 
   const locked = today.status === 'COMPLETED';
   const allChecked = today.completedProblems >= today.requiredProblems;
+  // With a verified account LeetCode problems are checked off by their Accepted submission only.
+  const autoVerified = Boolean(user?.leetcodeUsername);
   const busy = setProblem.isPending || completeDay.isPending;
   const error = setProblem.error ?? completeDay.error;
 
@@ -126,7 +170,7 @@ export function TodayPage() {
                   type="checkbox"
                   className="mt-1 h-5 w-5 shrink-0 accent-emerald-500"
                   checked={problem.completed}
-                  disabled={locked || busy}
+                  disabled={locked || busy || (autoVerified && problem.source === 'LeetCode')}
                   onChange={(event) =>
                     setProblem.mutate({ problemId: problem.id, completed: event.target.checked })
                   }
@@ -156,36 +200,73 @@ export function TodayPage() {
         )}
       </ul>
 
-      {user?.leetcodeUsername && !locked && (
-        <div className="mt-4 rounded-xl border border-border-muted bg-surface-200 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-zinc-400">
-              Solved a problem on LeetCode already? We&apos;ll check your recent accepted
-              submissions.
-            </p>
-            <Button
-              variant="secondary"
-              loading={verifyToday.isPending}
-              onClick={() => verifyToday.mutate()}
-            >
-              <RefreshCw className="h-4 w-4" aria-hidden /> Check Submission
-            </Button>
+      {!locked && (
+        <section
+          aria-label="LeetCode verification"
+          className="mt-4 rounded-xl border border-border-muted bg-surface-200 p-4"
+        >
+          <ul className="space-y-2">
+            {today.problems.map((problem) => {
+              const line = verificationLine(
+                problem,
+                verifyToday.data,
+                verifyToday.isPending,
+                Boolean(user?.leetcodeUsername)
+              );
+              return (
+                <li key={problem.id} className="flex items-start justify-between gap-3 text-sm">
+                  <span className="text-zinc-300">{problem.title}</span>
+                  <span className={line.done ? 'text-protected' : 'text-zinc-500'}>
+                    {line.text}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border-muted pt-4">
+            {user?.leetcodeUsername ? (
+              <>
+                <p className="text-sm text-zinc-400">
+                  Solved one on LeetCode already? We check automatically, or you can check now.
+                </p>
+                <Button
+                  variant="secondary"
+                  loading={verifyToday.isPending}
+                  onClick={() => verifyToday.mutate()}
+                >
+                  <RefreshCw className="h-4 w-4" aria-hidden /> Check submission
+                </Button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-zinc-400">
+                  Connect your LeetCode account to have solved problems checked off automatically.
+                </p>
+                <Link to="/settings" className={buttonClasses({ variant: 'secondary' })}>
+                  Connect LeetCode
+                </Link>
+              </>
+            )}
           </div>
+
           {verifyToday.isSuccess && (
-            <p className="mt-2 text-sm text-zinc-500">
-              {verifyToday.data.verifiedProblemIds.length > 0
-                ? `✓ Verified ${verifyToday.data.verifiedProblemIds.length} problem${verifyToday.data.verifiedProblemIds.length > 1 ? 's' : ''} from LeetCode.`
-                : verifyToday.data.providerAvailable
-                  ? 'No accepted submission found yet for today’s problems.'
-                  : 'Verification temporarily unavailable — this was not marked as missed. Try again shortly.'}
+            <p role="status" className="mt-3 text-sm text-zinc-400">
+              {verifyToday.data.dayCompleted
+                ? "✓ All of today's problems are verified — today's commitment is complete."
+                : verifyToday.data.verifiedProblemIds.length > 0
+                  ? `✓ Verified ${verifyToday.data.verifiedProblemIds.length} problem${verifyToday.data.verifiedProblemIds.length > 1 ? 's' : ''} from LeetCode.`
+                  : !verifyToday.data.providerAvailable
+                    ? "LeetCode verification is temporarily unavailable. Your commitment has not been marked as missed because of this — we'll keep retrying."
+                    : 'No accepted submission found yet. Make sure you solved today’s assigned problem with your connected LeetCode account.'}
             </p>
           )}
           {verifyToday.isError && (
-            <p role="alert" className="mt-2 text-sm text-risk">
+            <p role="alert" className="mt-3 text-sm text-risk">
               {verifyToday.error.message}
             </p>
           )}
-        </div>
+        </section>
       )}
 
       {error && (

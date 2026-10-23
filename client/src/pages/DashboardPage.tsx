@@ -7,6 +7,7 @@ import { ProgressCalendar } from '../components/commitment/ProgressCalendar';
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState';
 import { useAuth } from '../hooks/useAuth';
 import {
+  useCancelCommitment,
   useCommitments,
   useCreatePaymentOrder,
   useDevActivate,
@@ -52,24 +53,34 @@ function VerifyEmailNotice() {
   const resend = useMutation({ mutationFn: authService.resendVerification });
   return (
     <div className="mt-6 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning">
-      <p>Verify your email before paying your deposit — this is how we&apos;ll reach you about your refund.</p>
+      <p>
+        Verify your email before paying your deposit — this is how we&apos;ll reach you about your
+        refund.
+      </p>
       <button
         type="button"
         className="mt-2 font-medium underline-offset-4 hover:underline disabled:no-underline disabled:opacity-70"
         disabled={resend.isPending || resend.isSuccess}
         onClick={() => resend.mutate()}
       >
-        {resend.isSuccess ? 'Verification email sent — check your inbox' : 'Resend verification email'}
+        {resend.isSuccess
+          ? 'Verification email sent — check your inbox'
+          : 'Resend verification email'}
       </button>
     </div>
   );
 }
+
+/** Today's calendar day in the commitment's timezone, as YYYY-MM-DD. */
+const todayKeyFor = (commitment: Commitment): string =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: commitment.timezone }).format(new Date());
 
 function PendingPaymentPanel({ commitment }: { commitment: Commitment }) {
   const { user } = useAuth();
   const activate = useDevActivate();
   const createOrder = useCreatePaymentOrder();
   const verifyPayment = useVerifyPayment(commitment.id);
+  const cancel = useCancelCommitment(commitment.id);
   // Covers the stretch between the checkout popup opening and it calling us back — neither
   // mutation is "pending" during that window, since we're waiting on the user, not the network.
   const [awaitingCheckout, setAwaitingCheckout] = useState(false);
@@ -102,7 +113,11 @@ function PendingPaymentPanel({ commitment }: { commitment: Commitment }) {
     }
   };
 
-  const error = checkoutError ?? createOrder.error?.message ?? verifyPayment.error?.message;
+  const error =
+    checkoutError ??
+    createOrder.error?.message ??
+    verifyPayment.error?.message ??
+    cancel.error?.message;
 
   return (
     <section className="rounded-2xl border border-border-subtle bg-surface-100 p-6">
@@ -111,8 +126,10 @@ function PendingPaymentPanel({ commitment }: { commitment: Commitment }) {
         <Stat label="Money committed" value={formatINR(commitment.depositAmount)} />
       </dl>
       <p className="mt-6 text-sm text-zinc-400">
-        Your commitment is created but not active yet. Pay your deposit to lock it in — Day 1 starts
-        today, right after payment, with its deadline at 11:59 PM tonight in your timezone.
+        Your commitment is created but not active yet. Pay your deposit to lock it in.{' '}
+        {commitment.projectedStartDate && commitment.projectedStartDate > todayKeyFor(commitment)
+          ? `Because little of today is left, Day 1 will start tomorrow (${formatDayKey(commitment.projectedStartDate)}).`
+          : 'Day 1 starts today, right after payment, with its deadline at 11:59 PM tonight in your timezone.'}
       </p>
 
       {!emailVerified && <VerifyEmailNotice />}
@@ -125,6 +142,21 @@ function PendingPaymentPanel({ commitment }: { commitment: Commitment }) {
         >
           Pay {formatINR(commitment.depositAmount)} &amp; activate
         </Button>
+        <button
+          type="button"
+          className="ml-4 text-sm text-zinc-400 underline hover:text-zinc-200 disabled:opacity-50"
+          disabled={cancel.isPending || createOrder.isPending || awaitingCheckout}
+          onClick={() => {
+            if (
+              window.confirm(
+                'Cancel this commitment? A payment still in progress will be refunded.'
+              )
+            )
+              cancel.mutate();
+          }}
+        >
+          Cancel commitment
+        </button>
         {error && (
           <p role="alert" className="mt-3 text-sm text-risk">
             {error}

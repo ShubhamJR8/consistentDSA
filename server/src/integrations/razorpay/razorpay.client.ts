@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import Razorpay from 'razorpay';
 import { env } from '../../config/env.js';
 
@@ -21,10 +21,48 @@ const getClient = (): Razorpay => {
   return client;
 };
 
+// A hung gateway call must not hold a user's request (or a sweep) open indefinitely. The underlying
+// request may still complete on Razorpay's side, which is why callers treat a timeout as "unknown",
+// never as "didn't happen".
+const GATEWAY_TIMEOUT_MS = 10_000;
+const withTimeout = <T>(promise: Promise<T>, label: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Razorpay ${label} timed out after ${GATEWAY_TIMEOUT_MS}ms`)),
+      GATEWAY_TIMEOUT_MS
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+
 export interface RazorpayOrder {
   id: string;
   amount: number;
   currency: string;
+  status: string;
+}
+
+export interface RazorpayOrderPayment {
+  id: string;
+  /** Paise. */
+  amount: number;
+  /** created | authorized | captured | refunded | failed */
+  status: string;
+}
+
+export interface RazorpayPayment {
+  id: string;
+  orderId: string | null;
+  /** Paise. */
+  amount: number;
   status: string;
 }
 
@@ -37,16 +75,45 @@ export interface RazorpayRefund {
 export const razorpayClient = {
   /** Amount is in paise (smallest currency unit) — the caller converts rupees before calling. */
   async createOrder(amountPaise: number, receipt: string): Promise<RazorpayOrder> {
-    const order = await getClient().orders.create({
-      amount: amountPaise,
-      currency: 'INR',
-      receipt,
-    });
+    const order = await withTimeout(
+      getClient().orders.create({
+        amount: amountPaise,
+        currency: 'INR',
+        receipt,
+        // Capture automatically: an "authorized but never captured" payment would otherwise pass the
+        // checkout signature check while no money is actually taken (and no webhook ever fires).
+        payment_capture: true,
+      }),
+      'createOrder'
+    );
     return {
       id: order.id,
       amount: Number(order.amount),
       currency: order.currency,
       status: order.status,
+    };
+  },
+
+  /** Every payment attempt made against an order — used to find captures whose webhook and browser
+   *  callback both never reached us. */
+  async fetchOrderPayments(orderId: string): Promise<RazorpayOrderPayment[]> {
+    const result = await withTimeout(getClient().orders.fetchPayments(orderId), 'fetchPayments');
+    return result.items.map((payment) => ({
+      id: payment.id,
+      amount: Number(payment.amount),
+      status: payment.status,
+    }));
+  },
+
+  /** Server-side source of truth for one payment: the checkout signature only proves the browser
+   *  saw a success, not that the payment is captured or for the amount we asked for. */
+  async fetchPayment(paymentId: string): Promise<RazorpayPayment> {
+    const payment = await withTimeout(getClient().payments.fetch(paymentId), 'fetchPayment');
+    return {
+      id: payment.id,
+      orderId: payment.order_id ?? null,
+      amount: Number(payment.amount),
+      status: payment.status,
     };
   },
 
@@ -59,8 +126,9 @@ export const razorpayClient = {
     if (!env.RAZORPAY_KEY_SECRET) return false;
     const expected = createHmac('sha256', env.RAZORPAY_KEY_SECRET)
       .update(`${orderId}|${paymentId}`)
-      .digest('hex');
-    return expected === signature;
+      .digest();
+    const received = Buffer.from(signature, 'hex');
+    return received.length === expected.length && timingSafeEqual(received, expected);
   },
 
   /**
@@ -70,12 +138,33 @@ export const razorpayClient = {
    * beyond it simply stays in the account, which is how forfeiture is realized (no separate
    * payout call needed for the forfeited portion).
    */
-  async refund(paymentId: string, amountPaise: number): Promise<RazorpayRefund> {
-    const refund = await getClient().payments.refund(paymentId, { amount: amountPaise });
-    return {
-      id: refund.id,
-      amount: Number(refund.amount),
-      status: refund.status,
-    };
+  async refund(
+    paymentId: string,
+    amountPaise: number,
+    transactionId: string
+  ): Promise<RazorpayRefund> {
+    // `notes.transactionId` ties the refund to our ledger row, which is what lets a re-run (or the
+    // refund webhook) recognise a refund that already happened instead of issuing a second one.
+    const refund = await withTimeout(
+      getClient().payments.refund(paymentId, { amount: amountPaise, notes: { transactionId } }),
+      'refund'
+    );
+    return { id: refund.id, amount: Number(refund.amount), status: refund.status };
+  },
+
+  /** The refund we previously issued for this ledger row, if Razorpay has one. */
+  async findRefundForTransaction(
+    paymentId: string,
+    transactionId: string
+  ): Promise<RazorpayRefund | null> {
+    const result = await withTimeout(
+      getClient().payments.fetchMultipleRefund(paymentId, { count: 100 }),
+      'fetchRefunds'
+    );
+    const match = result.items.find(
+      (item) =>
+        String((item.notes as Record<string, unknown> | undefined)?.transactionId) === transactionId
+    );
+    return match ? { id: match.id, amount: Number(match.amount), status: match.status } : null;
   },
 };

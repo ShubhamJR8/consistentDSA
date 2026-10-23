@@ -8,11 +8,17 @@ import { Plan } from '../models/plan.model.js';
 import { User } from '../models/user.model.js';
 import { CreateCommitmentInput } from '../schemas/commitment.schema.js';
 import { ApiError } from '../utils/apiError.js';
-import { addDays, dayKeyFor, resolveTimezone } from '../utils/localDate.js';
+import { addDays, resolveTimezone } from '../utils/localDate.js';
 import { isDuplicateKeyError } from '../utils/mongo.js';
-import { CommitmentDto, getOwnedCommitment, toCommitmentDto } from './commitment.shared.js';
+import {
+  CommitmentDto,
+  getOwnedCommitment,
+  resolveStartDate,
+  toCommitmentDto,
+} from './commitment.shared.js';
 import { CommitmentRules } from './commitmentRules.service.js';
 import { DailyProgressService } from './dailyProgress.service.js';
+import { assertCanStartCommitment } from './leetcodeRequirement.service.js';
 
 export interface LedgerTransactionDto {
   id: string;
@@ -74,6 +80,8 @@ export class CommitmentService {
       throw ApiError.badRequest('PLAN_EMPTY', 'This plan has no problems yet.');
     }
 
+    await assertCanStartCommitment(user, plan.problemIds);
+
     // A commitment always covers every problem in the plan; duration is never a separate choice,
     // it's just how many days that takes at the chosen daily pace, rounded up so the last day
     // gets whatever's left over instead of silently dropping problems off the end.
@@ -101,6 +109,43 @@ export class CommitmentService {
       if (isDuplicateKeyError(error)) throw openCommitmentExists();
       throw error;
     }
+  }
+
+  /** Lets a user abandon a commitment they haven't paid for, which otherwise holds their single
+   *  open-commitment slot forever. Refused once a payment has been recorded; a payment still in flight
+   *  is refunded by PaymentWebhookService when it lands on a cancelled commitment. */
+  static async cancelUnpaid(userId: string, commitmentId: string): Promise<CommitmentDto> {
+    const commitment = await getOwnedCommitment(userId, commitmentId);
+    if (commitment.status !== 'PENDING_PAYMENT') {
+      throw ApiError.conflict(
+        'COMMITMENT_NOT_PENDING_PAYMENT',
+        'Only a commitment awaiting payment can be cancelled.'
+      );
+    }
+    if (
+      await CommitmentTransaction.exists({
+        commitmentId: commitment._id,
+        type: 'DEPOSIT',
+        status: 'SUCCESS',
+      })
+    ) {
+      throw ApiError.conflict(
+        'PAYMENT_ALREADY_RECEIVED',
+        'Your payment was received and your commitment is being activated.'
+      );
+    }
+    const cancelled = await Commitment.findOneAndUpdate(
+      { _id: commitment._id, status: 'PENDING_PAYMENT' },
+      { $set: { status: 'CANCELLED' } },
+      { new: true }
+    );
+    if (!cancelled) {
+      throw ApiError.conflict(
+        'COMMITMENT_NOT_PENDING_PAYMENT',
+        'Only a commitment awaiting payment can be cancelled.'
+      );
+    }
+    return toCommitmentDto(cancelled);
   }
 
   static async list(userId: string, now: Date = new Date()): Promise<CommitmentDto[]> {
@@ -150,7 +195,7 @@ export class CommitmentService {
       throw ApiError.badRequest('PLAN_TOO_SMALL', 'This plan no longer has enough problems.');
     }
 
-    const startDate = dayKeyFor(now, commitment.timezone);
+    const startDate = resolveStartDate(now, commitment.timezone);
     const endDate = addDays(startDate, commitment.durationDays - 1);
 
     await DailyProgressService.materialize(commitment, startDate, plan.problemIds);
@@ -189,6 +234,11 @@ export class CommitmentService {
         'Only a commitment awaiting payment can be activated.'
       );
     }
+    const [user, plan] = await Promise.all([
+      User.findById(userId),
+      Plan.findById(commitment.planId),
+    ]);
+    if (user && plan) await assertCanStartCommitment(user, plan.problemIds);
     return this.activate(commitment, now);
   }
 
