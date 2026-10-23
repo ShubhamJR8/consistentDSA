@@ -118,6 +118,21 @@ describe('leetCodeClient HTTP behaviour', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it('on 429 stops retrying, honours Retry-After, and fails fast without calling Alfa again', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('Too many request', { status: 429, headers: { 'retry-after': '120' } })
+    );
+
+    const first = await leetCodeClient.getProfile('abc').catch((e) => e);
+    expect(first).toBeInstanceOf(LeetCodeProviderError);
+    expect(first.retryAfterSeconds).toBeGreaterThan(100);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // not retried
+
+    const second = await leetCodeClient.getAcceptedSubmissions('abc').catch((e) => e);
+    expect(second).toBeInstanceOf(LeetCodeProviderError);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // cooldown: no network call at all
+  });
+
   it('caches successful submission lookups briefly', async () => {
     fetchMock.mockResolvedValue(json({ count: 0, submission: [] }));
     await leetCodeClient.getAcceptedSubmissions('abc');

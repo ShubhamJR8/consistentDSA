@@ -39,9 +39,13 @@ export interface AcceptedSubmissionsResult {
 /** The provider failed or answered with something we can't trust. Always retryable — never evidence
  *  that the user did or didn't do anything. `message` is for server logs only. */
 export class LeetCodeProviderError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  /** Set when the provider told us to back off (HTTP 429): seconds until it's worth trying again. */
+  readonly retryAfterSeconds?: number;
+
+  constructor(message: string, options?: { cause?: unknown; retryAfterSeconds?: number }) {
     super(message, options);
     this.name = 'LeetCodeProviderError';
+    this.retryAfterSeconds = options?.retryAfterSeconds;
   }
 }
 
@@ -83,11 +87,24 @@ const submissionsSchema = z.object({
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const RETRYABLE_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
 
 /** GETs `path` on the configured base URL with a timeout and bounded exponential backoff. Only
  *  network errors, timeouts and 408/425/429/5xx are retried; the rest fail immediately. */
+// Alfa's hosted instance allows 120 requests/hour per IP and answers 429 with Retry-After beyond
+// that. Once told to back off we stop calling entirely until then, rather than burning attempts
+// (or the sweep's requests) against a limit that is already hit.
+let blockedUntil = 0;
+const DEFAULT_BACKOFF_SECONDS = 60;
+const MAX_BACKOFF_SECONDS = 3600;
+
+const backoffError = (): LeetCodeProviderError =>
+  new LeetCodeProviderError('Alfa rate limit reached', {
+    retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000)),
+  });
+
 const getJson = async (path: string): Promise<unknown> => {
+  if (Date.now() < blockedUntil) throw backoffError();
   const url = new URL(path, env.LEETCODE_API_BASE_URL);
   let lastError: LeetCodeProviderError = new LeetCodeProviderError('Alfa request failed');
 
@@ -101,9 +118,19 @@ const getJson = async (path: string): Promise<unknown> => {
         signal: controller.signal,
       });
       if (res.ok) return (await res.json()) as unknown;
+      if (res.status === 429) {
+        const header = Number(res.headers.get('retry-after'));
+        const seconds = Number.isFinite(header) && header > 0 ? header : DEFAULT_BACKOFF_SECONDS;
+        blockedUntil = Date.now() + Math.min(seconds, MAX_BACKOFF_SECONDS) * 1000;
+        throw backoffError();
+      }
       lastError = new LeetCodeProviderError(`Alfa responded with HTTP ${res.status}`);
       retryable = RETRYABLE_STATUSES.has(res.status);
     } catch (error) {
+      if (error instanceof LeetCodeProviderError) {
+        // Our own backoff signal: keep it intact and don't retry into a limit we just hit.
+        throw error;
+      }
       lastError = new LeetCodeProviderError('Alfa request failed', { cause: error });
     } finally {
       clearTimeout(timeout);
@@ -167,7 +194,10 @@ interface CacheEntry {
 // provider when they hit the same user back to back.
 const submissionsCache = new Map<string, CacheEntry>();
 
-export const clearLeetCodeCache = (): void => submissionsCache.clear();
+export const clearLeetCodeCache = (): void => {
+  submissionsCache.clear();
+  blockedUntil = 0;
+};
 
 export const leetCodeClient: LeetCodeClient = {
   async getProfile(username) {

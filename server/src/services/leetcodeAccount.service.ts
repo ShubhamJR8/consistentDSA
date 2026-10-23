@@ -36,10 +36,12 @@ const accountInUse = (): ApiError =>
     'That LeetCode account is already linked to another CommitDSA user.'
   );
 
-const unavailable = (): ApiError =>
+const unavailable = (retryAfterSeconds?: number): ApiError =>
   ApiError.serviceUnavailable(
     'LEETCODE_UNAVAILABLE',
-    "We couldn't reach LeetCode to check your profile. Nothing was changed — please try again in a moment."
+    retryAfterSeconds
+      ? `LeetCode lookups are rate limited right now. Nothing was changed — try again in about ${Math.ceil(retryAfterSeconds / 60)} minute(s).`
+      : "We couldn't reach LeetCode to check your profile. Nothing was changed — please try again in a moment."
   );
 
 export class LeetCodeAccountService {
@@ -125,7 +127,7 @@ export class LeetCodeAccountService {
         user: userId,
         reason: error.message,
       });
-      throw unavailable();
+      throw unavailable(error.retryAfterSeconds);
     }
     if (!profile) {
       throw ApiError.notFound(
