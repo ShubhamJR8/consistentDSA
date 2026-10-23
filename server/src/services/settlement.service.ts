@@ -1,4 +1,4 @@
-import { ICommitment } from '../models/commitment.model.js';
+import { Commitment, ICommitment } from '../models/commitment.model.js';
 import { CommitmentTransaction } from '../models/commitmentTransaction.model.js';
 import { isDuplicateKeyError } from '../utils/mongo.js';
 
@@ -35,4 +35,41 @@ export const queueRefundIfEligible = async (commitment: ICommitment): Promise<vo
   } catch (error) {
     if (!isDuplicateKeyError(error)) throw error;
   }
+};
+
+/**
+ * Repairs the one gap reconcile() cannot: a commitment that was finalized but whose process died
+ * before queueRefundIfEligible ran. reconcile() skips non-ACTIVE commitments, so without this the
+ * refund owed to the user would simply never be recorded. Finds finalized commitments that still hold
+ * money, have a captured deposit, and no REFUND row yet, and queues them (idempotent per payment).
+ * Returns how many it queued.
+ */
+export const queueMissingRefunds = async (limit = 200): Promise<number> => {
+  const transactions = CommitmentTransaction.collection.name;
+  const candidates = await Commitment.aggregate<{ _id: ICommitment['_id'] }>([
+    { $match: { status: { $in: ['COMPLETED', 'FAILED'] }, currentProtectedAmount: { $gt: 0 } } },
+    {
+      $lookup: {
+        from: transactions,
+        let: { id: '$_id' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$commitmentId', '$$id'] }, type: 'REFUND' } },
+          { $limit: 1 },
+        ],
+        as: 'refunds',
+      },
+    },
+    { $match: { refunds: { $size: 0 } } },
+    { $limit: limit },
+    { $project: { _id: 1 } },
+  ]);
+
+  let queued = 0;
+  for (const { _id } of candidates) {
+    const commitment = await Commitment.findById(_id);
+    if (!commitment) continue;
+    await queueRefundIfEligible(commitment);
+    if (await CommitmentTransaction.exists({ commitmentId: _id, type: 'REFUND' })) queued += 1;
+  }
+  return queued;
 };

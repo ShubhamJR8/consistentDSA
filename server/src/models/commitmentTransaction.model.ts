@@ -36,6 +36,8 @@ export interface ICommitmentTransaction extends Document<Types.ObjectId> {
   refundReason?: RefundReason;
   /** DEPOSIT only: the latest Razorpay dispute (chargeback) state for the payment, as reported by
    *  webhook — e.g. created, under_review, won, lost. Anything but 'won' blocks refunding it. */
+  /** FORFEITURE only: the YYYY-MM-DD day this row accounts for, so a day can be recorded only once. */
+  dayKey?: string;
   disputeId?: string;
   disputeStatus?: string;
   createdAt: Date;
@@ -53,6 +55,7 @@ const CommitmentTransactionSchema = new Schema<ICommitmentTransaction>(
     razorpayPaymentId: { type: String },
     razorpayRefundId: { type: String },
     refundReason: { type: String, enum: REFUND_REASONS },
+    dayKey: { type: String },
     disputeId: { type: String },
     disputeStatus: { type: String },
   },
@@ -62,6 +65,17 @@ const CommitmentTransactionSchema = new Schema<ICommitmentTransaction>(
 CommitmentTransactionSchema.index({ commitmentId: 1, createdAt: 1 });
 CommitmentTransactionSchema.index({ razorpayOrderId: 1 });
 CommitmentTransactionSchema.index({ razorpayPaymentId: 1 });
+
+// A missed day is forfeited at most once, however many reconcile() calls (list, sweep, several tabs)
+// race to record it or retry after a crash.
+CommitmentTransactionSchema.index(
+  { commitmentId: 1, dayKey: 1 },
+  {
+    unique: true,
+    name: 'one_forfeiture_per_day',
+    partialFilterExpression: { type: 'FORFEITURE', dayKey: { $exists: true } },
+  }
+);
 
 // A payment is refunded at most once — the backstop against double-queuing under concurrent
 // reconcile()/webhook calls (replaces the old one-refund-per-commitment index, which could not

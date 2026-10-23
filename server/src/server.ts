@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { connectDB } from './config/db.js';
+import { connectDB, ensureIndexes } from './config/db.js';
 import { describeError, logger } from './utils/logger.js';
 import { env } from './config/env.js';
 import {
@@ -17,6 +17,7 @@ import {
 
 const startServer = async () => {
   await connectDB();
+  await ensureIndexes();
 
   const app = createApp();
 

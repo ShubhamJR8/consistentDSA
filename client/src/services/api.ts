@@ -1,6 +1,8 @@
 import type { ApiEnvelope, ApiFieldIssue } from '../types/api';
 
-const API_BASE = '/api';
+// Same-origin by default (Vite proxy in dev, reverse proxy in production). VITE_API_BASE_URL points the
+// browser at an API on its own origin instead; see client/.env.example.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL?.trim() || '/api').replace(/\/+$/, '');
 
 export class ApiClientError extends Error {
   readonly status: number;

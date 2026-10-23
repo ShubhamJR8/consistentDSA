@@ -3,6 +3,7 @@ import { DailyProgress } from '../models/dailyProgress.model.js';
 import { User } from '../models/user.model.js';
 import { env } from '../config/env.js';
 import { getLeetCodeProviderStatus } from '../integrations/leetcode/leetcode.client.js';
+import { withLease } from '../utils/jobLease.js';
 import { logger } from '../utils/logger.js';
 import { addDays, dayKeyFor, endOfDay } from '../utils/localDate.js';
 import { LeetCodeVerificationService } from '../services/leetcodeVerification.service.js';
@@ -128,8 +129,12 @@ let timer: ReturnType<typeof setInterval> | null = null;
 export const startLeetCodeVerificationJob = (intervalMinutes: number): void => {
   if (timer) return;
   const intervalMs = Math.max(1, intervalMinutes) * 60_000;
+  // One instance at a time: every instance ticks, whoever wins the lease sweeps. Matters most here,
+  // where each extra sweep spends the provider's per-IP request limit.
   timer = setInterval(() => {
-    void runLeetCodeVerificationSweep();
+    void withLease('leetcode-verification-sweep', Math.max(2 * intervalMs, 5 * 60_000), () =>
+      runLeetCodeVerificationSweep()
+    );
   }, intervalMs);
   timer.unref();
 };

@@ -1,0 +1,27 @@
+# Local dependencies for development:  docker compose up -d
+#
+# `alfa` is the patched self-hosted LeetCode data provider (see infra/alfa/Dockerfile for why the stock
+# image is not enough). Point the server at it with LEETCODE_API_BASE_URL=http://localhost:3000 and a
+# larger LEETCODE_API_HOURLY_BUDGET, so local testing never touches the hosted instance's shared
+# 120 requests/hour limit.
+services:
+  mongo:
+    image: mongo:7
+    ports: ['27017:27017']
+    volumes: ['mongo-data:/data/db']
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.runCommand({ping:1})']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  alfa:
+    build: ./infra/alfa
+    ports: ['3000:3000']
+    environment:
+      RATE_LIMIT_PER_HOUR: '3000'
+      CACHE_DURATION: '20 seconds'
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
