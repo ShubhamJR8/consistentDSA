@@ -190,7 +190,8 @@ function Wizard({ options, plans }: { options: CommitmentOptions; plans: PlanSum
                   </li>
                   <li>
                     Day 1 starts today, the moment payment activates your commitment — its deadline
-                    is still 11:59 PM tonight in your timezone, so pay early in the day if you can.
+                    is 11:59 PM tonight in your timezone. If less than a few hours of today are left
+                    when you pay, Day 1 starts tomorrow instead.
                   </li>
                   <li>These rules are locked in when you commit and never change afterwards.</li>
                 </ul>

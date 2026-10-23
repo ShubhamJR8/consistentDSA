@@ -8,9 +8,14 @@ import { Plan } from '../models/plan.model.js';
 import { User } from '../models/user.model.js';
 import { CreateCommitmentInput } from '../schemas/commitment.schema.js';
 import { ApiError } from '../utils/apiError.js';
-import { addDays, dayKeyFor, resolveTimezone } from '../utils/localDate.js';
+import { addDays, resolveTimezone } from '../utils/localDate.js';
 import { isDuplicateKeyError } from '../utils/mongo.js';
-import { CommitmentDto, getOwnedCommitment, toCommitmentDto } from './commitment.shared.js';
+import {
+  CommitmentDto,
+  getOwnedCommitment,
+  resolveStartDate,
+  toCommitmentDto,
+} from './commitment.shared.js';
 import { CommitmentRules } from './commitmentRules.service.js';
 import { DailyProgressService } from './dailyProgress.service.js';
 import { assertCanStartCommitment } from './leetcodeRequirement.service.js';
@@ -190,7 +195,7 @@ export class CommitmentService {
       throw ApiError.badRequest('PLAN_TOO_SMALL', 'This plan no longer has enough problems.');
     }
 
-    const startDate = dayKeyFor(now, commitment.timezone);
+    const startDate = resolveStartDate(now, commitment.timezone);
     const endDate = addDays(startDate, commitment.durationDays - 1);
 
     await DailyProgressService.materialize(commitment, startDate, plan.problemIds);

@@ -8,7 +8,9 @@ export type TransactionType = (typeof TRANSACTION_TYPES)[number];
 export const REFUND_REASONS = ['SETTLEMENT', 'DUPLICATE_PAYMENT', 'UNACTIVATABLE'] as const;
 export type RefundReason = (typeof REFUND_REASONS)[number];
 
-export const TRANSACTION_STATUSES = ['PENDING', 'SUCCESS', 'FAILED'] as const;
+// PROCESSING (REFUND only): a refund call is in flight or its outcome is unknown. It is never retried
+// blindly — the refund script first looks for the refund on Razorpay (see scripts/refunds.ts).
+export const TRANSACTION_STATUSES = ['PENDING', 'PROCESSING', 'SUCCESS', 'FAILED'] as const;
 export type TransactionStatus = (typeof TRANSACTION_STATUSES)[number];
 
 // The auditable financial history behind a commitment — never mutate depositAmount/
@@ -32,6 +34,10 @@ export interface ICommitmentTransaction extends Document<Types.ObjectId> {
   razorpayRefundId?: string;
   /** REFUND only. */
   refundReason?: RefundReason;
+  /** DEPOSIT only: the latest Razorpay dispute (chargeback) state for the payment, as reported by
+   *  webhook — e.g. created, under_review, won, lost. Anything but 'won' blocks refunding it. */
+  disputeId?: string;
+  disputeStatus?: string;
   createdAt: Date;
 }
 
@@ -47,12 +53,15 @@ const CommitmentTransactionSchema = new Schema<ICommitmentTransaction>(
     razorpayPaymentId: { type: String },
     razorpayRefundId: { type: String },
     refundReason: { type: String, enum: REFUND_REASONS },
+    disputeId: { type: String },
+    disputeStatus: { type: String },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );
 
 CommitmentTransactionSchema.index({ commitmentId: 1, createdAt: 1 });
 CommitmentTransactionSchema.index({ razorpayOrderId: 1 });
+CommitmentTransactionSchema.index({ razorpayPaymentId: 1 });
 
 // A payment is refunded at most once — the backstop against double-queuing under concurrent
 // reconcile()/webhook calls (replaces the old one-refund-per-commitment index, which could not

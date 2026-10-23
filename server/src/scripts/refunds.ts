@@ -11,11 +11,15 @@ import mongoose from 'mongoose';
 import { connectDB } from '../config/db.js';
 import { isRazorpayConfigured, razorpayClient } from '../integrations/razorpay/razorpay.client.js';
 import { Commitment } from '../models/commitment.model.js';
+import { executeRefund } from '../services/refundExecution.service.js';
 import { CommitmentTransaction } from '../models/commitmentTransaction.model.js';
 import { User } from '../models/user.model.js';
 
 const list = async (): Promise<void> => {
-  const pending = await CommitmentTransaction.find({ type: 'REFUND', status: 'PENDING' }).sort({
+  const pending = await CommitmentTransaction.find({
+    type: 'REFUND',
+    status: { $in: ['PENDING', 'PROCESSING'] },
+  }).sort({
     createdAt: 1,
   });
 
@@ -32,12 +36,21 @@ const list = async (): Promise<void> => {
     console.log('----------------------------------------');
     console.log(`transactionId:      ${tx._id.toString()}`);
     console.log(`reason:             ${tx.refundReason ?? 'SETTLEMENT'}`);
+    console.log(
+      `state:              ${tx.status}${tx.status === 'PROCESSING' ? ' (outcome unknown - check Razorpay, then re-run execute)' : ''}`
+    );
     console.log(`user:               ${user?.email ?? '(deleted)'} (${tx.userId.toString()})`);
-    console.log(`commitment:         ${tx.commitmentId.toString()} — ${commitment?.planName ?? '(deleted)'}`);
+    console.log(
+      `commitment:         ${tx.commitmentId.toString()} — ${commitment?.planName ?? '(deleted)'}`
+    );
     console.log(`commitment status:  ${commitment?.status ?? 'unknown'}`);
     console.log(`deposit:            ₹${commitment?.depositAmount ?? '?'}`);
-    console.log(`missed days:        ${commitment?.missedDays ?? '?'} / ${commitment?.durationDays ?? '?'}`);
-    console.log(`refund amount:      ₹${tx.amount} (matches commitment.currentProtectedAmount: ${commitment?.currentProtectedAmount === tx.amount})`);
+    console.log(
+      `missed days:        ${commitment?.missedDays ?? '?'} / ${commitment?.durationDays ?? '?'}`
+    );
+    console.log(
+      `refund amount:      ₹${tx.amount} (matches commitment.currentProtectedAmount: ${commitment?.currentProtectedAmount === tx.amount})`
+    );
     console.log(`forfeited:          ₹${commitment?.currentForfeitedAmount ?? '?'}`);
     console.log(`original payment:   ${tx.razorpayPaymentId}`);
     console.log(`queued at:          ${tx.createdAt.toISOString()}`);
@@ -54,61 +67,15 @@ const execute = async (transactionId: string): Promise<void> => {
     return;
   }
 
-  const tx = await CommitmentTransaction.findById(transactionId);
-  if (!tx) {
-    console.error(`No transaction found with id ${transactionId}.`);
-    process.exitCode = 1;
-    return;
-  }
-  if (tx.type !== 'REFUND' || tx.status !== 'PENDING') {
-    console.error(`Transaction ${transactionId} is not a pending refund (type=${tx.type}, status=${tx.status}).`);
-    process.exitCode = 1;
-    return;
-  }
-  if (!tx.razorpayPaymentId) {
-    console.error(`Transaction ${transactionId} has no original payment id to refund against.`);
-    process.exitCode = 1;
-    return;
-  }
-
-  // Re-check against the commitment's current numbers right before calling Razorpay — catches the
-  // rare case where something changed between `list` and `execute`.
-  const commitment = await Commitment.findById(tx.commitmentId);
-  const settlement = !tx.refundReason || tx.refundReason === 'SETTLEMENT';
-  if (settlement) {
-    if (!commitment || !['COMPLETED', 'FAILED'].includes(commitment.status)) {
-      console.error(`Commitment ${tx.commitmentId.toString()} is not in a finalized state.`);
-      process.exitCode = 1;
-      return;
-    }
-    if (commitment.currentProtectedAmount !== tx.amount) {
-      console.error(
-        `Amount mismatch: transaction says ₹${tx.amount}, commitment.currentProtectedAmount is ₹${commitment.currentProtectedAmount}. Refusing to proceed.`
-      );
-      process.exitCode = 1;
-      return;
-    }
-  } else if (tx.refundReason === 'UNACTIVATABLE' && commitment?.status !== 'CANCELLED') {
-    // A full-deposit refund is only right for a commitment that never started.
-    console.error(`Commitment ${tx.commitmentId.toString()} is not cancelled; refusing a full refund.`);
-    process.exitCode = 1;
-    return;
-  }
-  // DUPLICATE_PAYMENT: the whole extra payment goes back whatever state the commitment is in.
-
-  console.log(`Refunding ₹${tx.amount} against payment ${tx.razorpayPaymentId}...`);
-  try {
-    const refund = await razorpayClient.refund(tx.razorpayPaymentId, tx.amount * 100);
-    tx.status = 'SUCCESS';
-    tx.razorpayRefundId = refund.id;
-    tx.reference = 'Refund executed via manual script';
-    await tx.save();
-    console.log(`Success. Razorpay refund id: ${refund.id}`);
-  } catch (error) {
-    tx.status = 'FAILED';
-    tx.reference = `Refund attempt failed: ${error instanceof Error ? error.message : String(error)}`;
-    await tx.save();
-    console.error('Refund failed:', error);
+  const result = await executeRefund(transactionId, razorpayClient);
+  if (result.ok) {
+    console.log(
+      result.code === 'ADOPTED_EXISTING'
+        ? `Refund already existed on Razorpay; ledger updated. ${result.message}`
+        : `Success. ${result.message}`
+    );
+  } else {
+    console.error(`${result.code}: ${result.message}`);
     process.exitCode = 1;
   }
 };

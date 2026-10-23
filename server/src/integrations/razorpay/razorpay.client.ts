@@ -138,12 +138,33 @@ export const razorpayClient = {
    * beyond it simply stays in the account, which is how forfeiture is realized (no separate
    * payout call needed for the forfeited portion).
    */
-  async refund(paymentId: string, amountPaise: number): Promise<RazorpayRefund> {
-    const refund = await getClient().payments.refund(paymentId, { amount: amountPaise });
-    return {
-      id: refund.id,
-      amount: Number(refund.amount),
-      status: refund.status,
-    };
+  async refund(
+    paymentId: string,
+    amountPaise: number,
+    transactionId: string
+  ): Promise<RazorpayRefund> {
+    // `notes.transactionId` ties the refund to our ledger row, which is what lets a re-run (or the
+    // refund webhook) recognise a refund that already happened instead of issuing a second one.
+    const refund = await withTimeout(
+      getClient().payments.refund(paymentId, { amount: amountPaise, notes: { transactionId } }),
+      'refund'
+    );
+    return { id: refund.id, amount: Number(refund.amount), status: refund.status };
+  },
+
+  /** The refund we previously issued for this ledger row, if Razorpay has one. */
+  async findRefundForTransaction(
+    paymentId: string,
+    transactionId: string
+  ): Promise<RazorpayRefund | null> {
+    const result = await withTimeout(
+      getClient().payments.fetchMultipleRefund(paymentId, { count: 100 }),
+      'fetchRefunds'
+    );
+    const match = result.items.find(
+      (item) =>
+        String((item.notes as Record<string, unknown> | undefined)?.transactionId) === transactionId
+    );
+    return match ? { id: match.id, amount: Number(match.amount), status: match.status } : null;
   },
 };

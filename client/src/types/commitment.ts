@@ -51,6 +51,8 @@ export interface Commitment {
   timezone: string;
   startDate: string | null;
   endDate: string | null;
+  /** Only while awaiting payment: the day Day 1 would start if payment landed now. */
+  projectedStartDate: string | null;
   durationDays: number;
   dailyTarget: number;
   totalProblems: number;
@@ -164,7 +166,7 @@ export interface VerifyPaymentInput {
 }
 
 export type LedgerTransactionType = 'DEPOSIT' | 'FORFEITURE' | 'REFUND';
-export type LedgerTransactionStatus = 'PENDING' | 'SUCCESS' | 'FAILED';
+export type LedgerTransactionStatus = 'PENDING' | 'PROCESSING' | 'SUCCESS' | 'FAILED';
 
 export interface LedgerTransaction {
   id: string;

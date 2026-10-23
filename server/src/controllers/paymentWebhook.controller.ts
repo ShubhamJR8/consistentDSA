@@ -10,7 +10,11 @@ export class PaymentWebhookController {
       throw ApiError.badRequest('WEBHOOK_PAYLOAD_INVALID', 'Expected a JSON body.');
     }
     const signature = req.header('x-razorpay-signature');
-    const outcome = await PaymentWebhookService.handle(req.body, signature);
+    const outcome = await PaymentWebhookService.handle(
+      req.body,
+      signature,
+      req.header('x-razorpay-event-id')
+    );
     // 2xx tells Razorpay to stop retrying; every outcome that reaches here is final.
     sendSuccess(res, { outcome });
   });

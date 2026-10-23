@@ -7,7 +7,7 @@ dotenv.config();
 // superRefine below, which fails startup if a real JWT_SECRET isn't provided there.
 const DEV_JWT_SECRET = 'commit_dsa_super_secret_jwt_key_dev_2026_at_least_32_chars';
 
-const envSchema = z
+export const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     PORT: z.coerce.number().default(5001),
@@ -62,6 +62,10 @@ const envSchema = z
     // Safety net for payments whose browser callback and webhook both went missing: asks Razorpay
     // about deposits still PENDING after this long and activates the ones that were captured. It
     // only ever activates; it never refunds or moves money. Runs only when Razorpay is configured.
+    // A commitment activated with fewer than this many hours left in the user's local day starts
+    // tomorrow instead, so a late-evening payment (or a delayed webhook) can't hand them a Day 1 with
+    // minutes on the clock — and a forfeiture they had no fair chance to avoid.
+    PAYMENT_MIN_START_HOURS: z.coerce.number().min(0).default(3),
     PAYMENT_RECONCILIATION_INTERVAL_MINUTES: z.coerce.number().default(10),
     PAYMENT_RECONCILIATION_MIN_AGE_MINUTES: z.coerce.number().min(0).default(10),
     // Generic SMTP, so any provider works (Gmail, SES, SendGrid, Resend, etc). Left unset in dev —
@@ -80,12 +84,34 @@ const envSchema = z
         message: 'JWT_SECRET must be set to a real 32+ char secret in production.',
       });
     }
-    if (data.NODE_ENV === 'production' && data.RAZORPAY_KEY_ID && !data.RAZORPAY_WEBHOOK_SECRET) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['RAZORPAY_WEBHOOK_SECRET'],
-        message: 'RAZORPAY_WEBHOOK_SECRET must be set in production when Razorpay is enabled.',
-      });
+    if (data.NODE_ENV === 'production') {
+      // Everything that silently degrades in development must be real in production: payments with
+      // no webhook lose users' money, and an unconfigured mailer logs account-takeover links.
+      const required = [
+        'RAZORPAY_KEY_ID',
+        'RAZORPAY_KEY_SECRET',
+        'RAZORPAY_WEBHOOK_SECRET',
+        'EMAIL_HOST',
+        'EMAIL_USER',
+        'EMAIL_PASS',
+      ] as const;
+      for (const key of required) {
+        if (!data[key]) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [key],
+            message: `${key} must be set in production.`,
+          });
+        }
+      }
+      // The auth cookie is SameSite=None; Secure, and the origin allow-list is built from this.
+      if (!data.CLIENT_URL.startsWith('https://')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['CLIENT_URL'],
+          message: 'CLIENT_URL must be an https:// URL in production.',
+        });
+      }
     }
   })
   .transform((data) => ({
