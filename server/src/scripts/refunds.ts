@@ -31,6 +31,7 @@ const list = async (): Promise<void> => {
     ]);
     console.log('----------------------------------------');
     console.log(`transactionId:      ${tx._id.toString()}`);
+    console.log(`reason:             ${tx.refundReason ?? 'SETTLEMENT'}`);
     console.log(`user:               ${user?.email ?? '(deleted)'} (${tx.userId.toString()})`);
     console.log(`commitment:         ${tx.commitmentId.toString()} — ${commitment?.planName ?? '(deleted)'}`);
     console.log(`commitment status:  ${commitment?.status ?? 'unknown'}`);
@@ -73,18 +74,27 @@ const execute = async (transactionId: string): Promise<void> => {
   // Re-check against the commitment's current numbers right before calling Razorpay — catches the
   // rare case where something changed between `list` and `execute`.
   const commitment = await Commitment.findById(tx.commitmentId);
-  if (!commitment || !['COMPLETED', 'FAILED'].includes(commitment.status)) {
-    console.error(`Commitment ${tx.commitmentId.toString()} is not in a finalized state.`);
+  const settlement = !tx.refundReason || tx.refundReason === 'SETTLEMENT';
+  if (settlement) {
+    if (!commitment || !['COMPLETED', 'FAILED'].includes(commitment.status)) {
+      console.error(`Commitment ${tx.commitmentId.toString()} is not in a finalized state.`);
+      process.exitCode = 1;
+      return;
+    }
+    if (commitment.currentProtectedAmount !== tx.amount) {
+      console.error(
+        `Amount mismatch: transaction says ₹${tx.amount}, commitment.currentProtectedAmount is ₹${commitment.currentProtectedAmount}. Refusing to proceed.`
+      );
+      process.exitCode = 1;
+      return;
+    }
+  } else if (tx.refundReason === 'UNACTIVATABLE' && commitment?.status !== 'CANCELLED') {
+    // A full-deposit refund is only right for a commitment that never started.
+    console.error(`Commitment ${tx.commitmentId.toString()} is not cancelled; refusing a full refund.`);
     process.exitCode = 1;
     return;
   }
-  if (commitment.currentProtectedAmount !== tx.amount) {
-    console.error(
-      `Amount mismatch: transaction says ₹${tx.amount}, commitment.currentProtectedAmount is ₹${commitment.currentProtectedAmount}. Refusing to proceed.`
-    );
-    process.exitCode = 1;
-    return;
-  }
+  // DUPLICATE_PAYMENT: the whole extra payment goes back whatever state the commitment is in.
 
   console.log(`Refunding ₹${tx.amount} against payment ${tx.razorpayPaymentId}...`);
   try {

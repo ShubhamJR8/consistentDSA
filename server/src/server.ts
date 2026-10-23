@@ -1,7 +1,14 @@
 import { createApp } from './app.js';
 import { connectDB } from './config/db.js';
 import { env } from './config/env.js';
-import { startLeetCodeVerificationJob, stopLeetCodeVerificationJob } from './jobs/leetcodeVerification.job.js';
+import {
+  startLeetCodeVerificationJob,
+  stopLeetCodeVerificationJob,
+} from './jobs/leetcodeVerification.job.js';
+import {
+  startPaymentReconciliationJob,
+  stopPaymentReconciliationJob,
+} from './jobs/paymentReconciliation.job.js';
 import {
   startCommitmentSettlementJob,
   stopCommitmentSettlementJob,
@@ -30,10 +37,13 @@ const startServer = async () => {
     `[Server] Commitment settlement sweep enabled, every ${env.COMMITMENT_SETTLEMENT_INTERVAL_MINUTES}m`
   );
 
+  startPaymentReconciliationJob(env.PAYMENT_RECONCILIATION_INTERVAL_MINUTES);
+
   const handleShutdown = () => {
     console.log('\n[Server] Graceful shutdown initiated...');
     stopLeetCodeVerificationJob();
     stopCommitmentSettlementJob();
+    stopPaymentReconciliationJob();
     server.close(() => {
       console.log('[Server] HTTP server closed.');
       process.exit(0);

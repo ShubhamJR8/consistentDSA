@@ -7,6 +7,7 @@ vi.mock('../integrations/razorpay/razorpay.client.js', () => ({
   razorpayClient: {
     createOrder: vi.fn(),
     verifyCheckoutSignature: vi.fn(),
+    fetchPayment: vi.fn(),
   },
 }));
 
@@ -23,6 +24,7 @@ import { extractAuthCookie } from '../test-utils/authCookie.js';
 const mockIsConfigured = vi.mocked(isRazorpayConfigured);
 const mockCreateOrder = vi.mocked(razorpayClient.createOrder);
 const mockVerifySignature = vi.mocked(razorpayClient.verifyCheckoutSignature);
+const mockFetchPayment = vi.mocked(razorpayClient.fetchPayment);
 
 const TEST_DB = 'commit_dsa_test_payments';
 
@@ -112,6 +114,13 @@ describe('Payments (Razorpay test mode)', () => {
     mockIsConfigured.mockReset().mockReturnValue(true);
     mockCreateOrder.mockReset();
     mockVerifySignature.mockReset();
+    // By convention a test's payment id is its order id with 'pay_' in place of 'order_'.
+    mockFetchPayment.mockReset().mockImplementation(async (id: string) => ({
+      id,
+      orderId: id.replace('pay_', 'order_'),
+      amount: 100000,
+      status: 'captured',
+    }));
   });
 
   describe('POST /api/payments/create', () => {
@@ -263,7 +272,7 @@ describe('Payments (Razorpay test mode)', () => {
       expect(tx?.razorpayPaymentId).toBe('pay_verify_ok');
     });
 
-    it('never trusts the frontend: a bad signature fails the payment and leaves it PENDING_PAYMENT', async () => {
+    it('never trusts the frontend: a bad signature is rejected and changes no stored state', async () => {
       mockCreateOrder.mockResolvedValueOnce({
         id: 'order_bad_sig',
         amount: 100000,
@@ -284,8 +293,9 @@ describe('Payments (Razorpay test mode)', () => {
       expect(res.status).toBe(400);
       expect(res.body.error.code).toBe('PAYMENT_SIGNATURE_INVALID');
 
+      // Not FAILED: a bogus call must not be able to hide a real payment from reconciliation.
       const tx = await CommitmentTransaction.findOne({ commitmentId, type: 'DEPOSIT' });
-      expect(tx?.status).toBe('FAILED');
+      expect(tx?.status).toBe('PENDING');
 
       const commitment = await Commitment.findById(commitmentId);
       expect(commitment?.status).toBe('PENDING_PAYMENT');

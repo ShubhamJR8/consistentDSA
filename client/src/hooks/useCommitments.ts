@@ -31,8 +31,27 @@ export const usePlan = (id: string | null) =>
     staleTime: 5 * 60_000,
   });
 
+// While a commitment is awaiting payment, keep checking: the payment may have been confirmed by the
+// server (webhook / reconciliation) after the checkout tab was closed or the callback never arrived.
+const PENDING_PAYMENT_POLL_MS = 5000;
+
 export const useCommitments = () =>
-  useQuery({ queryKey: queryKeys.commitments, queryFn: commitmentsService.list });
+  useQuery({
+    queryKey: queryKeys.commitments,
+    queryFn: commitmentsService.list,
+    refetchInterval: (query) =>
+      query.state.data?.some((commitment) => commitment.status === 'PENDING_PAYMENT')
+        ? PENDING_PAYMENT_POLL_MS
+        : false,
+  });
+
+export function useCancelCommitment(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => commitmentsService.cancel(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.commitments }),
+  });
+}
 
 export const useToday = (id: string, enabled = true) =>
   useQuery({

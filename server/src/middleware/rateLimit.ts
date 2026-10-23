@@ -31,7 +31,7 @@ export const authRateLimiter = rateLimit({
 // with several server instances each keeps its own count (the limit is per instance).
 const perUser = (req: { user?: { userId: string } }): string => req.user?.userId ?? 'anonymous';
 
-const leetCodeLimiter = (limit: number, code: string) =>
+const perUserLimiter = (limit: number, code: string) =>
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit,
@@ -43,11 +43,14 @@ const leetCodeLimiter = (limit: number, code: string) =>
     },
   });
 
-export const leetCodeChallengeRateLimiter = leetCodeLimiter(
+export const leetCodeChallengeRateLimiter = perUserLimiter(
   env.LEETCODE_CHALLENGE_RATE_LIMIT,
   'LEETCODE_RATE_LIMITED'
 );
-export const leetCodeVerifyRateLimiter = leetCodeLimiter(
+export const leetCodeVerifyRateLimiter = perUserLimiter(
   env.LEETCODE_VERIFY_RATE_LIMIT,
   'LEETCODE_RATE_LIMITED'
 );
+
+// Order creation calls Razorpay and verification is the money path: cap both per user.
+export const paymentRateLimiter = perUserLimiter(30, 'PAYMENT_RATE_LIMITED');

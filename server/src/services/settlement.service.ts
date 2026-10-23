@@ -30,6 +30,7 @@ export const queueRefundIfEligible = async (commitment: ICommitment): Promise<vo
       status: 'PENDING',
       reference: 'Awaiting manual verification and refund execution',
       razorpayPaymentId: deposit.razorpayPaymentId,
+      refundReason: 'SETTLEMENT',
     });
   } catch (error) {
     if (!isDuplicateKeyError(error)) throw error;

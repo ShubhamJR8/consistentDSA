@@ -106,6 +106,43 @@ export class CommitmentService {
     }
   }
 
+  /** Lets a user abandon a commitment they haven't paid for, which otherwise holds their single
+   *  open-commitment slot forever. Refused once a payment has been recorded; a payment still in flight
+   *  is refunded by PaymentWebhookService when it lands on a cancelled commitment. */
+  static async cancelUnpaid(userId: string, commitmentId: string): Promise<CommitmentDto> {
+    const commitment = await getOwnedCommitment(userId, commitmentId);
+    if (commitment.status !== 'PENDING_PAYMENT') {
+      throw ApiError.conflict(
+        'COMMITMENT_NOT_PENDING_PAYMENT',
+        'Only a commitment awaiting payment can be cancelled.'
+      );
+    }
+    if (
+      await CommitmentTransaction.exists({
+        commitmentId: commitment._id,
+        type: 'DEPOSIT',
+        status: 'SUCCESS',
+      })
+    ) {
+      throw ApiError.conflict(
+        'PAYMENT_ALREADY_RECEIVED',
+        'Your payment was received and your commitment is being activated.'
+      );
+    }
+    const cancelled = await Commitment.findOneAndUpdate(
+      { _id: commitment._id, status: 'PENDING_PAYMENT' },
+      { $set: { status: 'CANCELLED' } },
+      { new: true }
+    );
+    if (!cancelled) {
+      throw ApiError.conflict(
+        'COMMITMENT_NOT_PENDING_PAYMENT',
+        'Only a commitment awaiting payment can be cancelled.'
+      );
+    }
+    return toCommitmentDto(cancelled);
+  }
+
   static async list(userId: string, now: Date = new Date()): Promise<CommitmentDto[]> {
     const commitments = await Commitment.find({ userId }).sort({ createdAt: -1 });
     for (const commitment of commitments) {

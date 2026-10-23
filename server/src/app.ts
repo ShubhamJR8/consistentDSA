@@ -8,6 +8,7 @@ import authRoutes from './routes/auth.routes.js';
 import commitmentRoutes from './routes/commitment.routes.js';
 import paymentRoutes from './routes/payment.routes.js';
 import leetCodeIntegrationRoutes from './routes/leetcodeIntegration.routes.js';
+import { PaymentWebhookController } from './controllers/paymentWebhook.controller.js';
 import { planRoutes, problemRoutes } from './routes/catalog.routes.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { ApiError } from './utils/apiError.js';
@@ -36,6 +37,14 @@ export const createApp = (): Express => {
   if (env.NODE_ENV !== 'test') {
     app.use(morgan('dev'));
   }
+
+  // Razorpay webhook: server-to-server, so no cookie auth. It must see the raw bytes (the signature
+  // covers them) and therefore has to be registered before express.json() below.
+  app.post(
+    '/api/payments/webhook',
+    express.raw({ type: 'application/json', limit: '64kb' }),
+    PaymentWebhookController.handle
+  );
 
   // Auth reads its JWT from an httpOnly cookie (see utils/cookies.ts) — needs the raw cookie
   // header parsed into req.cookies.

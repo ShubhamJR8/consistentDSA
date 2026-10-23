@@ -7,6 +7,7 @@ import { ProgressCalendar } from '../components/commitment/ProgressCalendar';
 import { EmptyState, ErrorState, LoadingState } from '../components/PageState';
 import { useAuth } from '../hooks/useAuth';
 import {
+  useCancelCommitment,
   useCommitments,
   useCreatePaymentOrder,
   useDevActivate,
@@ -70,6 +71,7 @@ function PendingPaymentPanel({ commitment }: { commitment: Commitment }) {
   const activate = useDevActivate();
   const createOrder = useCreatePaymentOrder();
   const verifyPayment = useVerifyPayment(commitment.id);
+  const cancel = useCancelCommitment(commitment.id);
   // Covers the stretch between the checkout popup opening and it calling us back — neither
   // mutation is "pending" during that window, since we're waiting on the user, not the network.
   const [awaitingCheckout, setAwaitingCheckout] = useState(false);
@@ -102,7 +104,11 @@ function PendingPaymentPanel({ commitment }: { commitment: Commitment }) {
     }
   };
 
-  const error = checkoutError ?? createOrder.error?.message ?? verifyPayment.error?.message;
+  const error =
+    checkoutError ??
+    createOrder.error?.message ??
+    verifyPayment.error?.message ??
+    cancel.error?.message;
 
   return (
     <section className="rounded-2xl border border-border-subtle bg-surface-100 p-6">
@@ -125,6 +131,16 @@ function PendingPaymentPanel({ commitment }: { commitment: Commitment }) {
         >
           Pay {formatINR(commitment.depositAmount)} &amp; activate
         </Button>
+        <button
+          type="button"
+          className="ml-4 text-sm text-zinc-400 underline hover:text-zinc-200 disabled:opacity-50"
+          disabled={cancel.isPending || createOrder.isPending || awaitingCheckout}
+          onClick={() => {
+            if (window.confirm('Cancel this commitment? A payment still in progress will be refunded.')) cancel.mutate();
+          }}
+        >
+          Cancel commitment
+        </button>
         {error && (
           <p role="alert" className="mt-3 text-sm text-risk">
             {error}

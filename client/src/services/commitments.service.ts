@@ -22,6 +22,7 @@ export const commitmentsService = {
     apiRequest<Commitment>('/commitments', { method: 'POST', body: input }),
   devActivate: (id: string) =>
     apiRequest<Commitment>(`${base(id)}/dev-activate`, { method: 'POST' }),
+  cancel: (id: string) => apiRequest<Commitment>(`${base(id)}/cancel`, { method: 'POST' }),
   today: (id: string) => apiRequest<TodayResponse>(`${base(id)}/today`),
   progress: (id: string) => apiRequest<ProgressResponse>(`${base(id)}/progress`),
   setProblem: (id: string, body: { problemId: string; completed: boolean }) =>

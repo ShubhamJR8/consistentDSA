@@ -55,6 +55,15 @@ const envSchema = z
     // KEY_ID is safe to hand to the frontend's Checkout widget; KEY_SECRET never leaves the server.
     RAZORPAY_KEY_ID: z.string().optional(),
     RAZORPAY_KEY_SECRET: z.string().optional(),
+    // Signs payment webhooks (Dashboard > Settings > Webhooks) — a different secret from the API key.
+    // Without it POST /api/payments/webhook answers 503 and a payment whose browser callback never
+    // arrives is not activated automatically.
+    RAZORPAY_WEBHOOK_SECRET: z.string().min(8).optional(),
+    // Safety net for payments whose browser callback and webhook both went missing: asks Razorpay
+    // about deposits still PENDING after this long and activates the ones that were captured. It
+    // only ever activates; it never refunds or moves money. Runs only when Razorpay is configured.
+    PAYMENT_RECONCILIATION_INTERVAL_MINUTES: z.coerce.number().default(10),
+    PAYMENT_RECONCILIATION_MIN_AGE_MINUTES: z.coerce.number().min(0).default(10),
     // Generic SMTP, so any provider works (Gmail, SES, SendGrid, Resend, etc). Left unset in dev —
     // password-reset links are logged to the console instead of emailed. See email.service.ts.
     EMAIL_HOST: z.string().optional(),
@@ -69,6 +78,13 @@ const envSchema = z
         code: z.ZodIssueCode.custom,
         path: ['JWT_SECRET'],
         message: 'JWT_SECRET must be set to a real 32+ char secret in production.',
+      });
+    }
+    if (data.NODE_ENV === 'production' && data.RAZORPAY_KEY_ID && !data.RAZORPAY_WEBHOOK_SECRET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['RAZORPAY_WEBHOOK_SECRET'],
+        message: 'RAZORPAY_WEBHOOK_SECRET must be set in production when Razorpay is enabled.',
       });
     }
   })
