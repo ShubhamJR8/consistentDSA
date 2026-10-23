@@ -1,3 +1,4 @@
+import { flushSync } from 'react-dom';
 import { Link, Outlet, useNavigate } from 'react-router-dom';
 import { Button } from '../components/Button';
 import { Logo } from '../components/Logo';
@@ -8,8 +9,10 @@ export function AppLayout() {
   const navigate = useNavigate();
 
   const handleLogout = () => {
+    // Leave the authenticated pages first so their queries are unmounted before the cache is
+    // cleared; otherwise they refetch against the just-invalidated session and log 401s.
+    flushSync(() => navigate('/', { replace: true }));
     logout();
-    navigate('/', { replace: true });
   };
 
   return (
@@ -17,7 +20,7 @@ export function AppLayout() {
       <header className="border-b border-border-subtle">
         <div className="mx-auto flex h-16 max-w-5xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-8">
-            <Logo to="/dashboard" />
+            <Logo />
             <nav className="flex items-center gap-6 text-sm">
               <Link to="/dashboard" className="text-zinc-300 transition-colors hover:text-white">
                 Dashboard
