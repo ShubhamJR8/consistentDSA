@@ -1,5 +1,6 @@
 import { createApp } from './app.js';
 import { connectDB } from './config/db.js';
+import { describeError, logger } from './utils/logger.js';
 import { env } from './config/env.js';
 import {
   startLeetCodeVerificationJob,
@@ -49,6 +50,19 @@ const startServer = async () => {
       process.exit(0);
     });
   };
+
+  // State after an uncaught exception or unhandled rejection is unknown, so don't limp on: say so
+  // loudly, finish in-flight requests briefly, and exit non-zero so the platform restarts the process.
+  const crash = (event: string) => (error: unknown) => {
+    logger.alert(event, describeError(error));
+    stopLeetCodeVerificationJob();
+    stopCommitmentSettlementJob();
+    stopPaymentReconciliationJob();
+    server.close(() => process.exit(1));
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+  process.on('uncaughtException', crash('uncaught_exception'));
+  process.on('unhandledRejection', crash('unhandled_rejection'));
 
   process.on('SIGTERM', handleShutdown);
   process.on('SIGINT', handleShutdown);

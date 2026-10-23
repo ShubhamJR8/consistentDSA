@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { ApiError } from '../utils/apiError.js';
 import { sendError } from '../utils/apiResponse.js';
 import { env } from '../config/env.js';
+import { describeError, logger } from '../utils/logger.js';
 
 export const errorHandler = (err: any, req: Request, res: Response, next: NextFunction): void => {
   if (err instanceof ApiError) {
@@ -26,7 +27,12 @@ export const errorHandler = (err: any, req: Request, res: Response, next: NextFu
     return;
   }
 
-  console.error('[Unhandled Error]', err);
+  logger.error('unhandled_error', {
+    requestId: req.id,
+    method: req.method,
+    path: req.path,
+    ...describeError(err),
+  });
 
   const message = env.NODE_ENV === 'production' ? 'Internal server error' : err.message;
   sendError(res, 500, 'INTERNAL_SERVER_ERROR', message);

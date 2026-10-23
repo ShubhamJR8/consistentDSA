@@ -42,7 +42,7 @@ export interface IDailyProgress extends Document<Types.ObjectId> {
   /** Outcome of the most recent LeetCode check of this day. `inconclusive` = the provider failed or
    *  its history may have been truncated, so "nothing found" proves nothing — used to extend the
    *  grace period before the day can be marked missed. */
-  lastVerification?: { checkedAt: Date; inconclusive: boolean };
+  lastVerification?: { checkedAt: Date; inconclusive: boolean; providerUnavailable?: boolean };
 }
 
 const LeetCodeEvidenceSchema = new Schema<ILeetCodeEvidence>(
@@ -80,7 +80,10 @@ const DailyProgressSchema = new Schema<IDailyProgress>({
   status: { type: String, enum: DAY_STATUSES, default: 'PENDING' },
   completedAt: { type: Date, default: null },
   lastVerification: {
-    type: new Schema({ checkedAt: Date, inconclusive: Boolean }, { _id: false }),
+    type: new Schema(
+      { checkedAt: Date, inconclusive: Boolean, providerUnavailable: Boolean },
+      { _id: false }
+    ),
     default: undefined,
   },
 });

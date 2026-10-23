@@ -9,6 +9,7 @@ import {
 } from '../models/commitmentTransaction.model.js';
 import { ProcessedWebhookEvent } from '../models/processedWebhookEvent.model.js';
 import { ApiError } from '../utils/apiError.js';
+import { logger } from '../utils/logger.js';
 import { isDuplicateKeyError, isObjectIdString } from '../utils/mongo.js';
 import { CommitmentService } from './commitment.service.js';
 
@@ -189,7 +190,7 @@ export class PaymentWebhookService {
         { $set: { disputeId: id, disputeStatus: state } }
       );
       if (state !== 'won') {
-        console.error('[PaymentWebhook] DISPUTE needs attention', {
+        logger.alert('payment_dispute', {
           dispute: id,
           payment: paymentId,
           state,
@@ -238,7 +239,7 @@ export class PaymentWebhookService {
       }
     );
     if (result.modifiedCount > 0) {
-      console.error('[PaymentWebhook] REFUND FAILED at Razorpay', { refund: id, transactionId });
+      logger.alert('refund_failed_at_razorpay', { refund: id, transactionId });
     }
     return 'refund_reconciled';
   }
@@ -262,7 +263,7 @@ export class PaymentWebhookService {
     // Razorpay amounts are in paise. A mismatch means this capture is not the deposit we asked for;
     // never activate on it.
     if (payment.amount !== transaction.amount * 100) {
-      console.error('[PaymentWebhook] amount mismatch', {
+      logger.alert('payment_amount_mismatch', {
         order: payment.orderId,
         expectedPaise: transaction.amount * 100,
         receivedPaise: payment.amount,
@@ -291,7 +292,7 @@ export class PaymentWebhookService {
           }
         );
         await queueFullRefund(transaction, payment.id, 'DUPLICATE_PAYMENT');
-        console.error('[PaymentWebhook] duplicate payment, refund queued', {
+        logger.alert('duplicate_payment_refund_queued', {
           commitment: transaction.commitmentId.toString(),
           payment: payment.id,
         });
@@ -324,7 +325,7 @@ export class PaymentWebhookService {
           { $set: { status: 'CANCELLED' } }
         );
         await queueFullRefund(transaction, payment.id, 'UNACTIVATABLE');
-        console.error('[PaymentWebhook] commitment cannot start, cancelled and refund queued', {
+        logger.alert('paid_commitment_cancelled_refund_queued', {
           commitment: commitment._id.toString(),
           code: error.code,
         });

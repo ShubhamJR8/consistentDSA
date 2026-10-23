@@ -59,13 +59,27 @@ export const assertNoActiveCommitment = async (userId: string): Promise<void> =>
   }
 };
 
-/** When a day's verification grace ends: its deadline plus the base grace, or the outage cap when
- *  the last check was inconclusive. */
+/** When a day's verification grace ends. The invariant: a day is never marked missed on the strength
+ *  of a check that could not have seen the evidence.
+ *   - No check since the deadline (the sweep was down, nobody clicked) or the provider was unreachable
+ *     at the last one: held up to the provider-down backstop — it is re-verified the moment a check
+ *     can succeed, so this is a ceiling, not a delay everyone pays.
+ *   - A check that worked but whose 20-submission window may have hidden a solve: a short cap, since
+ *     waiting cannot make that history reappear.
+ *   - A conclusive check after the deadline that found nothing: just the base grace, which covers
+ *     the provider's own response cache. */
 export const verificationGraceEnd = (progress: IDailyProgress, timezone: string): Date => {
-  const minutes = progress.lastVerification?.inconclusive
-    ? env.LEETCODE_GRACE_OUTAGE_MAX_HOURS * 60
-    : env.LEETCODE_GRACE_MINUTES;
-  return new Date(endOfDay(progress.date, timezone).getTime() + minutes * 60_000);
+  const deadline = endOfDay(progress.date, timezone).getTime();
+  const last = progress.lastVerification;
+  const checkedAfterDeadline = last !== undefined && last.checkedAt.getTime() >= deadline;
+
+  const minutes =
+    !checkedAfterDeadline || last?.providerUnavailable
+      ? env.LEETCODE_GRACE_PROVIDER_DOWN_MAX_HOURS * 60
+      : last?.inconclusive
+        ? env.LEETCODE_GRACE_OUTAGE_MAX_HOURS * 60
+        : env.LEETCODE_GRACE_MINUTES;
+  return new Date(deadline + minutes * 60_000);
 };
 
 /** True if a PENDING day for a verified-account user is still inside its grace window and has

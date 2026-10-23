@@ -103,12 +103,75 @@ const backoffError = (): LeetCodeProviderError =>
     retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - Date.now()) / 1000)),
   });
 
+// Rolling-hour request budget, so this server never spends more than its share of the provider's
+// per-IP limit (and a burst from the sweep can't lock out users clicking "Check submission").
+const HOUR_MS = 3_600_000;
+const requestTimes: number[] = [];
+
+const pruneRequests = (now: number): void => {
+  while (requestTimes.length > 0 && now - requestTimes[0] >= HOUR_MS) requestTimes.shift();
+};
+
+const budgetError = (now: number): LeetCodeProviderError =>
+  new LeetCodeProviderError('Local request budget exhausted', {
+    retryAfterSeconds: Math.max(1, Math.ceil((requestTimes[0] + HOUR_MS - now) / 1000)),
+  });
+
+// What the provider has been doing lately, for the health endpoint and outage alerts.
+let lastSuccessAt: number | null = null;
+let failingSince: number | null = null;
+let consecutiveFailures = 0;
+
+const recordSuccess = (): void => {
+  lastSuccessAt = Date.now();
+  failingSince = null;
+  consecutiveFailures = 0;
+};
+const recordFailure = (): void => {
+  failingSince ??= Date.now();
+  consecutiveFailures += 1;
+};
+
+export interface LeetCodeProviderStatus {
+  state: 'unknown' | 'ok' | 'down';
+  lastSuccessAt: Date | null;
+  failingSince: Date | null;
+  consecutiveFailures: number;
+  budget: { limit: number; used: number; remaining: number };
+}
+
+export const getLeetCodeProviderStatus = (): LeetCodeProviderStatus => {
+  pruneRequests(Date.now());
+  const limit = env.LEETCODE_API_HOURLY_BUDGET;
+  return {
+    state: failingSince !== null ? 'down' : lastSuccessAt !== null ? 'ok' : 'unknown',
+    lastSuccessAt: lastSuccessAt === null ? null : new Date(lastSuccessAt),
+    failingSince: failingSince === null ? null : new Date(failingSince),
+    consecutiveFailures,
+    budget: {
+      limit,
+      used: requestTimes.length,
+      remaining: limit === 0 ? Number.POSITIVE_INFINITY : Math.max(0, limit - requestTimes.length),
+    },
+  };
+};
+
 const getJson = async (path: string): Promise<unknown> => {
   if (Date.now() < blockedUntil) throw backoffError();
   const url = new URL(path, env.LEETCODE_API_BASE_URL);
   let lastError: LeetCodeProviderError = new LeetCodeProviderError('Alfa request failed');
 
   for (let attempt = 1; attempt <= env.LEETCODE_API_MAX_ATTEMPTS; attempt += 1) {
+    const now = Date.now();
+    pruneRequests(now);
+    if (
+      env.LEETCODE_API_HOURLY_BUDGET > 0 &&
+      requestTimes.length >= env.LEETCODE_API_HOURLY_BUDGET
+    ) {
+      throw budgetError(now);
+    }
+    requestTimes.push(now);
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), env.LEETCODE_API_TIMEOUT_MS);
     let retryable = true;
@@ -117,8 +180,13 @@ const getJson = async (path: string): Promise<unknown> => {
         headers: { Accept: 'application/json' },
         signal: controller.signal,
       });
-      if (res.ok) return (await res.json()) as unknown;
+      if (res.ok) {
+        const body = (await res.json()) as unknown;
+        recordSuccess();
+        return body;
+      }
       if (res.status === 429) {
+        recordFailure();
         const header = Number(res.headers.get('retry-after'));
         const seconds = Number.isFinite(header) && header > 0 ? header : DEFAULT_BACKOFF_SECONDS;
         blockedUntil = Date.now() + Math.min(seconds, MAX_BACKOFF_SECONDS) * 1000;
@@ -126,12 +194,14 @@ const getJson = async (path: string): Promise<unknown> => {
       }
       lastError = new LeetCodeProviderError(`Alfa responded with HTTP ${res.status}`);
       retryable = RETRYABLE_STATUSES.has(res.status);
+      recordFailure();
     } catch (error) {
       if (error instanceof LeetCodeProviderError) {
         // Our own backoff signal: keep it intact and don't retry into a limit we just hit.
         throw error;
       }
       lastError = new LeetCodeProviderError('Alfa request failed', { cause: error });
+      recordFailure();
     } finally {
       clearTimeout(timeout);
     }
@@ -197,6 +267,10 @@ const submissionsCache = new Map<string, CacheEntry>();
 export const clearLeetCodeCache = (): void => {
   submissionsCache.clear();
   blockedUntil = 0;
+  requestTimes.length = 0;
+  lastSuccessAt = null;
+  failingSince = null;
+  consecutiveFailures = 0;
 };
 
 export const leetCodeClient: LeetCodeClient = {

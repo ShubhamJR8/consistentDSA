@@ -121,9 +121,41 @@ describe('health check', () => {
   });
 });
 
+describe('health check: provider status', () => {
+  const app = createApp();
+
+  beforeAll(async () => {
+    const match = env.MONGODB_URI.match(/^(mongodb(?:\+srv)?:\/\/[^/]+)\/[^/?]*(\?.*)?$/);
+    await mongoose.connect(
+      match ? `${match[1]}/${TEST_DB}${match[2] ?? ''}` : `${env.MONGODB_URI}/${TEST_DB}`
+    );
+  });
+  afterAll(async () => {
+    await mongoose.connection.close();
+  });
+
+  it('reports the LeetCode provider without letting an outage fail readiness', async () => {
+    const res = await request(app).get('/api/health');
+    expect(res.status).toBe(200);
+    expect(res.body.data.leetcode).toHaveProperty('state');
+    expect(res.body.data.leetcode).not.toHaveProperty('budget'); // not exposed publicly
+  });
+
+  it('echoes a safe inbound request id and replaces an unsafe one', async () => {
+    const safe = await request(app).get('/api/health').set('X-Request-Id', 'abc-123-DEF_456');
+    expect(safe.headers['x-request-id']).toBe('abc-123-DEF_456');
+
+    const unsafe = await request(app)
+      .get('/api/health')
+      .set('X-Request-Id', 'has spaces and <markup>!');
+    expect(unsafe.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
 describe('production configuration', () => {
   const full = {
     NODE_ENV: 'production',
+    LEETCODE_VERIFICATION_ENABLED: 'true',
     JWT_SECRET: 'x'.repeat(40),
     CLIENT_URL: 'https://app.example.com',
     RAZORPAY_KEY_ID: 'rzp_live_x',
@@ -152,6 +184,12 @@ describe('production configuration', () => {
     'JWT_SECRET',
   ])('refuses to boot in production without %s', (key) => {
     expect(issues({ ...full, [key]: undefined })).toContain(key);
+  });
+
+  it('refuses to boot in production with the verification sweep off', () => {
+    expect(issues({ ...full, LEETCODE_VERIFICATION_ENABLED: 'false' })).toContain(
+      'LEETCODE_VERIFICATION_ENABLED'
+    );
   });
 
   it('refuses a non-https CLIENT_URL in production', () => {

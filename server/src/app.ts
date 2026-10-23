@@ -13,6 +13,8 @@ import { PaymentWebhookController } from './controllers/paymentWebhook.controlle
 import { planRoutes, problemRoutes } from './routes/catalog.routes.js';
 import { allowedOrigins } from './config/origins.js';
 import { originGuard } from './middleware/originGuard.js';
+import { requestId } from './middleware/requestId.js';
+import { getLeetCodeProviderStatus } from './integrations/leetcode/leetcode.client.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { ApiError } from './utils/apiError.js';
 import { sendSuccess } from './utils/apiResponse.js';
@@ -27,6 +29,7 @@ export const createApp = (): Express => {
   }
 
   // Security & Utility Middleware
+  app.use(requestId);
   app.use(helmet());
   app.use(
     cors({
@@ -38,7 +41,14 @@ export const createApp = (): Express => {
   );
 
   if (env.NODE_ENV !== 'test') {
-    app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+    morgan.token('rid', (req) => (req as express.Request).id ?? '-');
+    app.use(
+      morgan(
+        env.NODE_ENV === 'production'
+          ? ':remote-addr ":method :url HTTP/:http-version" :status :res[content-length] ":user-agent" rid=:rid :response-time ms'
+          : 'dev'
+      )
+    );
   }
 
   // Razorpay webhook: server-to-server, so no cookie auth. It must see the raw bytes (the signature
@@ -78,6 +88,13 @@ export const createApp = (): Express => {
       {
         status: database === 'up' ? 'healthy' : 'unhealthy',
         database,
+        // Informational only: a provider outage must not pull the server out of rotation, because
+        // days are held open (not penalised) while it is down.
+        leetcode: (({ state, lastSuccessAt, failingSince }) => ({
+          state,
+          lastSuccessAt,
+          failingSince,
+        }))(getLeetCodeProviderStatus()),
         timestamp: new Date().toISOString(),
         service: 'commit-dsa-server',
       },

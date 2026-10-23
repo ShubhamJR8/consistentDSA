@@ -1,15 +1,24 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 
-vi.mock('../integrations/leetcode/leetcode.client.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../integrations/leetcode/leetcode.client.js')>()),
-  leetCodeClient: { getProfile: vi.fn(), getAcceptedSubmissions: vi.fn() },
-}));
+vi.mock('../integrations/leetcode/leetcode.client.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../integrations/leetcode/leetcode.client.js')>();
+  return {
+    ...original,
+    getLeetCodeProviderStatus: vi.fn(original.getLeetCodeProviderStatus),
+    leetCodeClient: { getProfile: vi.fn(), getAcceptedSubmissions: vi.fn() },
+  };
+});
 
 import { createApp } from '../app.js';
 import { env } from '../config/env.js';
-import { LeetCodeProviderError, leetCodeClient } from '../integrations/leetcode/leetcode.client.js';
+import {
+  LeetCodeProviderError,
+  getLeetCodeProviderStatus,
+  leetCodeClient,
+} from '../integrations/leetcode/leetcode.client.js';
 import { runLeetCodeVerificationSweep } from '../jobs/leetcodeVerification.job.js';
 import { Commitment } from '../models/commitment.model.js';
 import { CommitmentTransaction } from '../models/commitmentTransaction.model.js';
@@ -787,8 +796,21 @@ describe('verification grace before a day is marked missed', () => {
     mockGetSubmissions.mockReset();
   });
 
-  it('holds back MISSED during the grace window, then marks it after', async () => {
+  it('holds back MISSED during the grace window, then marks it after a conclusive check', async () => {
     const { commitmentId } = await setup();
+    // The sweep checked after the deadline, reached the provider, and found nothing.
+    await DailyProgress.updateOne(
+      { commitmentId, dayNumber: 1 },
+      {
+        $set: {
+          lastVerification: {
+            checkedAt: new Date(midnight + 5 * MIN),
+            inconclusive: false,
+            providerUnavailable: false,
+          },
+        },
+      }
+    );
     const commitment = (await Commitment.findById(commitmentId))!;
 
     await DailyProgressService.reconcile(commitment, after(10 * MIN));
@@ -798,6 +820,42 @@ describe('verification grace before a day is marked missed', () => {
     await DailyProgressService.reconcile(commitment, after(31 * MIN));
     expect((await day1(commitmentId))?.status).toBe('MISSED');
     expect(await forfeitures(commitmentId)).toBe(1);
+  });
+
+  it('never marks a day missed when nothing has checked it since the deadline (e.g. the sweep was down)', async () => {
+    const { commitmentId } = await setup();
+    const commitment = (await Commitment.findById(commitmentId))!;
+
+    for (const elapsed of [31 * MIN, 7 * HOUR, 30 * HOUR]) {
+      await DailyProgressService.reconcile(commitment, after(elapsed));
+      expect((await day1(commitmentId))?.status, `${elapsed / HOUR}h`).toBe('PENDING');
+    }
+    expect(await forfeitures(commitmentId)).toBe(0);
+
+    // The backstop: it cannot be held forever.
+    await DailyProgressService.reconcile(commitment, after(73 * HOUR));
+    expect((await day1(commitmentId))?.status).toBe('MISSED');
+  });
+
+  it('a check made before the deadline does not count as having verified the day', async () => {
+    const { commitmentId } = await setup();
+    await DailyProgress.updateOne(
+      { commitmentId, dayNumber: 1 },
+      {
+        $set: {
+          lastVerification: {
+            checkedAt: new Date(midnight - 2 * MIN),
+            inconclusive: false,
+            providerUnavailable: false,
+          },
+        },
+      }
+    );
+    await DailyProgressService.reconcile(
+      (await Commitment.findById(commitmentId))!,
+      after(2 * HOUR)
+    );
+    expect((await day1(commitmentId))?.status).toBe('PENDING');
   });
 
   it('gives no grace to users without a verified account', async () => {
@@ -813,11 +871,19 @@ describe('verification grace before a day is marked missed', () => {
     expect((await day1(commitmentId))?.status).toBe('MISSED');
   });
 
-  it('extends the wait to the hard cap after an inconclusive check, but not beyond it', async () => {
+  it('a truncated history gets only the short cap: waiting cannot bring the missing solve back', async () => {
     const { commitmentId } = await setup();
     await DailyProgress.updateOne(
       { commitmentId, dayNumber: 1 },
-      { $set: { lastVerification: { checkedAt: new Date(midnight - MIN), inconclusive: true } } }
+      {
+        $set: {
+          lastVerification: {
+            checkedAt: new Date(midnight + MIN),
+            inconclusive: true,
+            providerUnavailable: false,
+          },
+        },
+      }
     );
     const commitment = (await Commitment.findById(commitmentId))!;
 
@@ -826,6 +892,93 @@ describe('verification grace before a day is marked missed', () => {
 
     await DailyProgressService.reconcile(commitment, after(7 * HOUR));
     expect((await day1(commitmentId))?.status).toBe('MISSED');
+  });
+
+  it('a provider outage holds the day open far past the 6 hour cap, up to the backstop', async () => {
+    const { commitmentId } = await setup();
+    await DailyProgress.updateOne(
+      { commitmentId, dayNumber: 1 },
+      {
+        $set: {
+          lastVerification: {
+            checkedAt: new Date(midnight + MIN),
+            inconclusive: true,
+            providerUnavailable: true,
+          },
+        },
+      }
+    );
+    const commitment = (await Commitment.findById(commitmentId))!;
+
+    for (const elapsed of [7 * HOUR, 30 * HOUR, 71 * HOUR]) {
+      await DailyProgressService.reconcile(commitment, after(elapsed));
+      expect((await day1(commitmentId))?.status, `${elapsed / HOUR}h`).toBe('PENDING');
+    }
+    expect(await forfeitures(commitmentId)).toBe(0);
+
+    await DailyProgressService.reconcile(commitment, after(73 * HOUR));
+    expect((await day1(commitmentId))?.status).toBe('MISSED');
+  });
+
+  it('a solve is found and credited once the provider recovers, hours later, with no forfeiture', async () => {
+    const { commitmentId, slug } = await setup();
+
+    // Right after the deadline the provider is down for everyone.
+    mockGetSubmissions.mockRejectedValue(new LeetCodeProviderError('down'));
+    await runLeetCodeVerificationSweep(after(10 * MIN));
+    expect((await day1(commitmentId))?.lastVerification?.providerUnavailable).toBe(true);
+
+    // Still down 10 hours later (past the old 6 hour cap): nothing is decided against the user.
+    await runLeetCodeVerificationSweep(after(10 * HOUR));
+    await DailyProgressService.reconcile(
+      (await Commitment.findById(commitmentId))!,
+      after(10 * HOUR)
+    );
+    expect((await day1(commitmentId))?.status).toBe('PENDING');
+    expect(await forfeitures(commitmentId)).toBe(0);
+
+    // It comes back and shows the solve they made inside the day.
+    mockGetSubmissions.mockResolvedValue({
+      submissions: [{ title: slug, titleSlug: slug, timestamp: midnight - 5 * MIN }],
+      limit: 20,
+    });
+    await runLeetCodeVerificationSweep(after(11 * HOUR));
+
+    expect((await day1(commitmentId))?.status).toBe('COMPLETED');
+    expect(await forfeitures(commitmentId)).toBe(0);
+    expect((await Commitment.findById(commitmentId))?.missedDays).toBe(0);
+  });
+
+  it('after recovery, a user who really did not solve is marked missed promptly', async () => {
+    const { commitmentId } = await setup();
+    mockGetSubmissions.mockRejectedValue(new LeetCodeProviderError('down'));
+    await runLeetCodeVerificationSweep(after(10 * MIN));
+
+    mockGetSubmissions.mockResolvedValue({ submissions: [], limit: 20 });
+    await runLeetCodeVerificationSweep(after(11 * HOUR));
+    await DailyProgressService.reconcile(
+      (await Commitment.findById(commitmentId))!,
+      after(11 * HOUR + MIN)
+    );
+
+    expect((await day1(commitmentId))?.status).toBe('MISSED');
+    expect(await forfeitures(commitmentId)).toBe(1);
+  });
+
+  it('the sweep re-checks held days older than yesterday, and checks past-deadline days first', async () => {
+    const { commitmentId } = await setup();
+    mockGetSubmissions.mockRejectedValue(new LeetCodeProviderError('down'));
+    await runLeetCodeVerificationSweep(after(10 * MIN));
+    mockGetSubmissions.mockReset().mockResolvedValue({ submissions: [], limit: 20 });
+
+    // Two and a half days later the held day 1 is two days behind "yesterday".
+    const later = after(2 * 24 * HOUR + 12 * HOUR);
+    await runLeetCodeVerificationSweep(later);
+
+    expect(mockGetSubmissions).toHaveBeenCalled();
+    const row = await day1(commitmentId);
+    expect(row?.lastVerification?.providerUnavailable).toBe(false);
+    expect(row?.lastVerification?.checkedAt.getTime()).toBe(later.getTime());
   });
 
   it('a solve from inside the day, found during grace, completes it with no forfeiture', async () => {
@@ -880,6 +1033,79 @@ describe('verification grace before a day is marked missed', () => {
     );
     expect((await day1(commitmentId))?.status).toBe('PENDING');
     expect(await forfeitures(commitmentId)).toBe(0);
+  });
+
+  describe('sweep under provider pressure', () => {
+    const realStatus = vi.mocked(getLeetCodeProviderStatus).getMockImplementation();
+    const status = (remaining: number, extra: Record<string, unknown> = {}) =>
+      vi.mocked(getLeetCodeProviderStatus).mockReturnValue({
+        state: 'ok',
+        lastSuccessAt: null,
+        failingSince: null,
+        consecutiveFailures: 0,
+        budget: { limit: 100, used: 100 - remaining, remaining },
+        ...extra,
+      });
+    const spies: Array<{ mockRestore: () => void }> = [];
+    afterEach(() => {
+      vi.mocked(getLeetCodeProviderStatus).mockReset().mockImplementation(realStatus!);
+      for (const spy of spies.splice(0)) spy.mockRestore();
+    });
+    const silence = (method: 'warn' | 'error') => {
+      const spy = vi.spyOn(console, method).mockImplementation(() => undefined);
+      spies.push(spy);
+      return spy;
+    };
+
+    it('with the budget nearly spent, skips days still in progress but still checks past-deadline ones', async () => {
+      // Day 1's deadline has passed (checked at +10 min); that is the urgent one.
+      const late = await setup();
+      status(10); // 10% left, under the 30% reserve
+      mockGetSubmissions.mockResolvedValue({ submissions: [], limit: 20 });
+
+      await runLeetCodeVerificationSweep(after(10 * MIN));
+      expect(mockGetSubmissions).toHaveBeenCalled();
+      expect((await day1(late.commitmentId))?.lastVerification).toBeDefined();
+
+      // A commitment whose day is still running (noon on day 1) is deferred to keep budget for users.
+      mockGetSubmissions.mockClear();
+      const running = await setup();
+      silence('warn');
+      await runLeetCodeVerificationSweep(day1Noon);
+      expect(
+        await DailyProgress.findOne({ commitmentId: running.commitmentId, dayNumber: 1 })
+      ).toMatchObject({
+        lastVerification: undefined,
+      });
+    });
+
+    it('with plenty of budget, checks days that are still in progress too', async () => {
+      const running = await setup();
+      status(100);
+      mockGetSubmissions.mockResolvedValue({ submissions: [], limit: 20 });
+
+      await runLeetCodeVerificationSweep(day1Noon);
+
+      expect((await day1(running.commitmentId))?.lastVerification?.checkedAt).toBeDefined();
+    });
+
+    it('raises an alert once the provider has been failing for 15 minutes, and not before', async () => {
+      await setup();
+      const errors = silence('error');
+      const failingSince = new Date(after(0).getTime());
+      mockGetSubmissions.mockRejectedValue(new LeetCodeProviderError('down'));
+
+      status(100, { state: 'down', failingSince, consecutiveFailures: 4 });
+      await runLeetCodeVerificationSweep(after(10 * MIN));
+      expect(errors.mock.calls.some((c) => String(c[0]).includes('leetcode_provider_down'))).toBe(
+        false
+      );
+
+      await runLeetCodeVerificationSweep(after(20 * MIN));
+      expect(errors.mock.calls.some((c) => String(c[0]).includes('leetcode_provider_down'))).toBe(
+        true
+      );
+    });
   });
 });
 

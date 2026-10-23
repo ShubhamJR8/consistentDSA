@@ -216,9 +216,10 @@ export class LeetCodeVerificationService {
         o.status === 'TEMPORARILY_UNAVAILABLE' ||
         (o.status === 'PENDING' && o.reason === 'history_truncated')
     );
+    const providerUnavailable = outcomes.some((o) => o.status === 'TEMPORARILY_UNAVAILABLE');
     await DailyProgress.updateOne(
       { _id: progress._id },
-      { $set: { lastVerification: { checkedAt: now, inconclusive } } }
+      { $set: { lastVerification: { checkedAt: now, inconclusive, providerUnavailable } } }
     );
 
     const verifiedProblemIds = outcomes
@@ -229,7 +230,7 @@ export class LeetCodeVerificationService {
 
     return {
       checkedAt: now,
-      providerAvailable: !outcomes.some((o) => o.status === 'TEMPORARILY_UNAVAILABLE'),
+      providerAvailable: !providerUnavailable,
       dayCompleted,
       verifiedProblemIds,
       stillPendingProblemIds: outcomes

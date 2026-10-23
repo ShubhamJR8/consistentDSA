@@ -5,6 +5,7 @@ import {
   CommitmentTransaction,
   ICommitmentTransaction,
 } from '../models/commitmentTransaction.model.js';
+import { describeError, logger } from '../utils/logger.js';
 import { PaymentWebhookService } from '../services/paymentWebhook.service.js';
 
 /**
@@ -61,9 +62,9 @@ export const runPaymentReconciliationSweep = async (
       const capture = payments.find((payment) => payment.status === 'captured');
       if (capture) await apply(transaction, capture);
     } catch (error) {
-      console.error('[PaymentReconciliation] sweep step failed', {
+      logger.error('payment_reconciliation_step_failed', {
         transaction: transaction._id.toString(),
-        error,
+        ...describeError(error),
       });
     }
   }
@@ -91,9 +92,10 @@ export const runPaymentReconciliationSweep = async (
         amount: transaction.amount * 100,
       });
     } catch (error) {
-      console.error('[PaymentReconciliation] retry of paid commitment failed', {
+      // A payment is recorded but its commitment still cannot start: a person should look.
+      logger.alert('paid_commitment_not_activated', {
         transaction: transaction._id.toString(),
-        error,
+        ...describeError(error),
       });
     }
   }
@@ -110,7 +112,7 @@ export const startPaymentReconciliationJob = (intervalMinutes: number): void => 
     if (sweeping) return;
     sweeping = true;
     void runPaymentReconciliationSweep()
-      .catch((error) => console.error('[PaymentReconciliation] sweep failed', error))
+      .catch((error) => logger.error('payment_reconciliation_failed', describeError(error)))
       .finally(() => {
         sweeping = false;
       });

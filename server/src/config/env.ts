@@ -43,7 +43,20 @@ export const envSchema = z
     // If the last check was inconclusive (provider down / history truncated) the wait extends to the
     // hard cap below. Neither delays or changes anything for days with nothing left to verify.
     LEETCODE_GRACE_MINUTES: z.coerce.number().min(0).default(30),
+    // Cap for an *inconclusive but not outage* check: the provider's 20-submission window may have
+    // hidden a solve. That can never resolve by waiting (the window only moves forward), so it is short.
     LEETCODE_GRACE_OUTAGE_MAX_HOURS: z.coerce.number().min(0).default(6),
+    // A day is held open — never marked MISSED — while the provider was unreachable at the last
+    // check, or nothing has checked it since its deadline (e.g. the sweep itself was down). It is
+    // re-verified as soon as the provider is back; this is only the absolute backstop.
+    LEETCODE_GRACE_PROVIDER_DOWN_MAX_HOURS: z.coerce.number().min(0).default(72),
+    // Requests per rolling hour this server will send to the provider; 0 = unlimited. The hosted Alfa
+    // allows 120/hour per IP (shared with every other user of this server), so the default stays under
+    // it. Raise it only when pointing LEETCODE_API_BASE_URL at your own patched instance.
+    LEETCODE_API_HOURLY_BUDGET: z.coerce.number().int().min(0).default(100),
+    // When this little of the hourly budget is left, the background sweep only spends it on days that
+    // are already past their deadline, keeping the rest for users clicking "Check submission".
+    LEETCODE_SWEEP_RESERVE_PERCENT: z.coerce.number().min(0).max(100).default(30),
     LEETCODE_CHALLENGE_TTL_MINUTES: z.coerce.number().default(10),
     LEETCODE_CHALLENGE_RATE_LIMIT: z.coerce.number().default(5),
     LEETCODE_VERIFY_RATE_LIMIT: z.coerce.number().default(10),
@@ -103,6 +116,14 @@ export const envSchema = z
             message: `${key} must be set in production.`,
           });
         }
+      }
+      // Without the sweep nothing verifies a day automatically, so solved days could be missed.
+      if (!data.LEETCODE_VERIFICATION_ENABLED) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['LEETCODE_VERIFICATION_ENABLED'],
+          message: 'LEETCODE_VERIFICATION_ENABLED must be true in production.',
+        });
       }
       // The auth cookie is SameSite=None; Secure, and the origin allow-list is built from this.
       if (!data.CLIENT_URL.startsWith('https://')) {

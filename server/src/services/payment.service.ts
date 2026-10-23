@@ -6,6 +6,7 @@ import {
 } from '../models/commitmentTransaction.model.js';
 import { User } from '../models/user.model.js';
 import { ApiError } from '../utils/apiError.js';
+import { describeError, logger } from '../utils/logger.js';
 import { isDuplicateKeyError } from '../utils/mongo.js';
 import { CommitmentDto, getOwnedCommitment, toCommitmentDto } from './commitment.shared.js';
 import { PaymentWebhookService } from './paymentWebhook.service.js';
@@ -142,7 +143,7 @@ export class PaymentService {
     } catch (error) {
       // Unknown whether Razorpay created an order; nothing was handed to the user, so it can't be
       // paid. Release the slot so a retry starts clean.
-      console.error('[Payments] createOrder failed', error);
+      logger.error('razorpay_create_order_failed', describeError(error));
       await CommitmentTransaction.deleteOne({ _id: reservation._id });
       throw gatewayUnavailable();
     }
@@ -204,7 +205,10 @@ export class PaymentService {
     try {
       payment = await razorpayClient.fetchPayment(input.razorpayPaymentId);
     } catch (error) {
-      console.error('[Payments] fetchPayment failed', error);
+      logger.error('razorpay_fetch_payment_failed', {
+        payment: input.razorpayPaymentId,
+        ...describeError(error),
+      });
       throw ApiError.serviceUnavailable(
         'PAYMENT_GATEWAY_UNAVAILABLE',
         "We couldn't confirm your payment with Razorpay yet. If you were charged, your commitment will activate automatically within a few minutes."
