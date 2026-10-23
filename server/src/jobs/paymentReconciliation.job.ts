@@ -5,6 +5,7 @@ import {
   CommitmentTransaction,
   ICommitmentTransaction,
 } from '../models/commitmentTransaction.model.js';
+import { withLease } from '../utils/jobLease.js';
 import { describeError, logger } from '../utils/logger.js';
 import { PaymentWebhookService } from '../services/paymentWebhook.service.js';
 
@@ -111,11 +112,11 @@ export const startPaymentReconciliationJob = (intervalMinutes: number): void => 
   timer = setInterval(() => {
     if (sweeping) return;
     sweeping = true;
-    void runPaymentReconciliationSweep()
-      .catch((error) => logger.error('payment_reconciliation_failed', describeError(error)))
-      .finally(() => {
-        sweeping = false;
-      });
+    void withLease('payment-reconciliation-sweep', Math.max(2 * intervalMs, 5 * 60_000), () =>
+      runPaymentReconciliationSweep()
+    ).finally(() => {
+      sweeping = false;
+    });
   }, intervalMs);
   timer.unref();
 };

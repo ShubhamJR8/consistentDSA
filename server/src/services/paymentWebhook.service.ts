@@ -279,8 +279,11 @@ export class PaymentWebhookService {
         );
       } catch (error) {
         if (!isDuplicateKeyError(error)) throw error;
-        // one_successful_deposit: a different payment already paid for this commitment, so this
-        // one is a second charge. Keep it out of the deposit ledger and queue its full refund.
+        // one_successful_deposit: a different payment already paid for this commitment, so this one
+        // is a second charge. Record the refund owed FIRST (idempotent per payment), then take the
+        // row out of the deposit ledger: a crash in between leaves the owed money recorded and the
+        // next delivery finishes the job, instead of leaving a FAILED row with no refund behind it.
+        await queueFullRefund(transaction, payment.id, 'DUPLICATE_PAYMENT');
         await CommitmentTransaction.updateOne(
           { _id: transaction._id },
           {
@@ -291,7 +294,6 @@ export class PaymentWebhookService {
             },
           }
         );
-        await queueFullRefund(transaction, payment.id, 'DUPLICATE_PAYMENT');
         logger.alert('duplicate_payment_refund_queued', {
           commitment: transaction.commitmentId.toString(),
           payment: payment.id,
@@ -320,11 +322,15 @@ export class PaymentWebhookService {
       const current = await Commitment.findById(commitment._id);
       if (current?.status === 'ACTIVE') return 'already_active';
       if (error instanceof ApiError && PERMANENT_ACTIVATION_ERRORS.has(error.code)) {
+        // Refund first, then cancel (see the duplicate-payment branch): if we die in between, the
+        // commitment is still PENDING_PAYMENT with a recorded payment, which the reconciliation sweep
+        // re-drives straight back here. The refund script refuses a full refund unless the commitment
+        // is CANCELLED, so a refund queued early can never be paid out for a commitment that starts.
+        await queueFullRefund(transaction, payment.id, 'UNACTIVATABLE');
         await Commitment.updateOne(
           { _id: commitment._id, status: 'PENDING_PAYMENT' },
           { $set: { status: 'CANCELLED' } }
         );
-        await queueFullRefund(transaction, payment.id, 'UNACTIVATABLE');
         logger.alert('paid_commitment_cancelled_refund_queued', {
           commitment: commitment._id.toString(),
           code: error.code,

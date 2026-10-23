@@ -89,7 +89,9 @@ const main = async (): Promise<void> => {
   } else if (command === 'execute' && arg) {
     await execute(arg);
   } else {
-    console.error('Usage: tsx src/scripts/refunds.ts list | execute <transactionId>');
+    console.error(
+      'Usage: refunds list | execute <transactionId>  (npm run refunds:list|refunds:execute, or node dist/scripts/refunds.js ...)'
+    );
     process.exitCode = 1;
   }
 

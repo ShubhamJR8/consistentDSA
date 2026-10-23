@@ -1,5 +1,8 @@
 import { Commitment } from '../models/commitment.model.js';
 import { DailyProgressService } from '../services/dailyProgress.service.js';
+import { queueMissingRefunds } from '../services/settlement.service.js';
+import { withLease } from '../utils/jobLease.js';
+import { describeError, logger } from '../utils/logger.js';
 
 /**
  * Finalizes commitments whose last day has passed even if nobody ever opens the app again —
@@ -15,11 +18,19 @@ export const runCommitmentSettlementSweep = async (now: Date = new Date()): Prom
     try {
       await DailyProgressService.reconcile(commitment, now);
     } catch (error) {
-      console.error('[CommitmentSettlement] sweep step failed', {
+      logger.error('commitment_settlement_step_failed', {
         commitment: commitment._id.toString(),
-        error,
+        ...describeError(error),
       });
     }
+  }
+
+  // After reconciling: catch any commitment that finalized but never had its refund queued.
+  try {
+    const queued = await queueMissingRefunds();
+    if (queued > 0) logger.warn('refunds_queued_by_repair', { count: queued });
+  } catch (error) {
+    logger.error('refund_repair_failed', describeError(error));
   }
 };
 
@@ -29,7 +40,9 @@ export const startCommitmentSettlementJob = (intervalMinutes: number): void => {
   if (timer) return;
   const intervalMs = Math.max(1, intervalMinutes) * 60_000;
   timer = setInterval(() => {
-    void runCommitmentSettlementSweep();
+    void withLease('commitment-settlement-sweep', Math.max(2 * intervalMs, 5 * 60_000), () =>
+      runCommitmentSettlementSweep()
+    );
   }, intervalMs);
   timer.unref();
 };

@@ -83,6 +83,18 @@ const findDay = async (commitment: ICommitment, date: string): Promise<IDailyPro
   return progress;
 };
 
+/** insertMany({ ordered: false }) reports duplicate-key conflicts as a bulk error but still inserts
+ *  every non-conflicting row. True only if *every* failure was a duplicate key, so a genuine error
+ *  alongside duplicates still surfaces. Verified against the driver: `writeErrors` is an array of
+ *  `{ err, index }` objects, with the server's error code at `err.code` (not `code`). */
+const isDuplicateInsertError = (error: unknown): boolean => {
+  type WriteErrorLike = { err?: { code?: number }; code?: number };
+  const { writeErrors, code } = (error ?? {}) as { writeErrors?: unknown; code?: number };
+  if (writeErrors === undefined) return code === 11000;
+  const list = (Array.isArray(writeErrors) ? writeErrors : [writeErrors]) as WriteErrorLike[];
+  return list.length > 0 && list.every((e) => (e.err?.code ?? e.code) === 11000);
+};
+
 export class DailyProgressService {
   /** Creates one record per commitment day. Idempotent, so a retried activation is safe. */
   static async materialize(
@@ -157,10 +169,13 @@ export class DailyProgressService {
       }
     }
 
-    if (newlyMissed.length > 0) {
-      await DailyProgress.updateMany(
-        { _id: { $in: newlyMissed.map((d) => d._id) } },
-        { $set: { status: 'MISSED' } }
+    // Step 1 — claim. Each day flips PENDING -> MISSED atomically, flagged as not yet recorded in the
+    // ledger. Only the caller that wins the flip proceeds as the claimant, so two concurrent
+    // reconciles never both decide the same day.
+    for (const day of newlyMissed) {
+      await DailyProgress.updateOne(
+        { _id: day._id, status: 'PENDING' },
+        { $set: { status: 'MISSED', forfeitureLogged: false } }
       );
     }
 
@@ -203,16 +218,35 @@ export class DailyProgressService {
         : 'FAILED'
       : commitment.status;
 
-    if (newlyMissed.length > 0) {
-      await CommitmentTransaction.insertMany(
-        newlyMissed.map((d) => ({
-          userId: commitment.userId,
-          commitmentId: commitment._id,
-          type: 'FORFEITURE' as const,
-          amount: perMissedDay,
-          status: 'SUCCESS' as const,
-          reference: `Missed day ${d.date}`,
-        }))
+    // Step 2 — record. Every MISSED day not yet in the ledger (just claimed here, or left by a run
+    // that crashed between claim and record) gets its FORFEITURE row. The unique one-per-day index
+    // makes this safe to repeat and to race: a duplicate insert is simply ignored. The flag is only
+    // cleared once the row exists, so a crash at any point is repaired by the next reconcile.
+    const unlogged = await DailyProgress.find({
+      commitmentId: commitment._id,
+      status: 'MISSED',
+      forfeitureLogged: false,
+    }).select('date');
+    if (unlogged.length > 0) {
+      try {
+        await CommitmentTransaction.insertMany(
+          unlogged.map((d) => ({
+            userId: commitment.userId,
+            commitmentId: commitment._id,
+            type: 'FORFEITURE' as const,
+            amount: perMissedDay,
+            status: 'SUCCESS' as const,
+            reference: `Missed day ${d.date}`,
+            dayKey: d.date,
+          })),
+          { ordered: false }
+        );
+      } catch (error) {
+        if (!isDuplicateInsertError(error)) throw error;
+      }
+      await DailyProgress.updateMany(
+        { _id: { $in: unlogged.map((d) => d._id) } },
+        { $set: { forfeitureLogged: true } }
       );
     }
 
